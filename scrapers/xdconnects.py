@@ -1,7 +1,11 @@
 # scrapers/xdconnects.py
 """
 Scraper pentru xdconnects.com (Bobby, Swiss Peak, Urban, etc.)
-Login: buton login → modal/pagină separată
+Structură pagină produs:
+- Culori: pătrate colorate în secțiunea "Colour:"
+- Item no: P705.709
+- Preț: 375,00 RON
+- Imagini: carousel lateral
 """
 import re
 import time
@@ -34,10 +38,7 @@ class XDConnectsScraper(BaseScraper):
             "#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll",
             "#CybotCookiebotDialogBodyButtonAccept",
             "#CybotCookiebotDialogBodyLevelButtonAccept",
-            "button[data-action='accept']",
-            "#onetrust-accept-btn-handler",
         ]
-
         for selector in selectors:
             try:
                 btn = self.driver.find_element(
@@ -48,7 +49,7 @@ class XDConnectsScraper(BaseScraper):
                         "arguments[0].click();", btn
                     )
                     time.sleep(2)
-                    st.info(f"🍪 XD: Cookie banner închis")
+                    st.info("🍪 XD: Cookie banner închis")
                     return
             except NoSuchElementException:
                 continue
@@ -59,8 +60,7 @@ class XDConnectsScraper(BaseScraper):
                 var sels = [
                     '#CybotCookiebotDialog',
                     '#CybotCookiebotDialogBody',
-                    '#CybotCookiebotDialogBodyUnderlay',
-                    '[class*="cookie"]', '[id*="cookie"]'
+                    '#CybotCookiebotDialogBodyUnderlay'
                 ];
                 sels.forEach(function(s) {
                     document.querySelectorAll(s).forEach(function(el) {
@@ -73,22 +73,8 @@ class XDConnectsScraper(BaseScraper):
         except Exception:
             pass
 
-    def _save_debug_screenshot(self, name: str):
-        """Screenshot debug."""
-        if not self.driver:
-            return
-        try:
-            screenshot = self.driver.get_screenshot_as_png()
-            st.image(
-                screenshot,
-                caption=f"🖥️ XD Debug: {name}",
-                width=700
-            )
-        except Exception:
-            pass
-
     def _login_if_needed(self):
-        """Login pe XD Connects - detectează metoda de login."""
+        """Login pe XD Connects."""
         if self._logged_in:
             return
 
@@ -104,48 +90,20 @@ class XDConnectsScraper(BaseScraper):
             if not self.driver:
                 return
 
-            # ═══ PASUL 1: Navigăm la site ═══
             st.info("🔐 XD: Mă conectez...")
             self.driver.get(f"{self.base_url}/en-gb/")
             time.sleep(5)
 
-            # Cookie banner
             self._dismiss_cookie_banner()
             time.sleep(1)
 
-            # ═══ PASUL 2: Căutăm butonul/linkul de Login ═══
+            # Căutăm butonul de Login
             login_link = None
-            login_selectors = [
-                # Linkuri directe de login
+            for selector in [
+                "a[href*='/profile/login']",
                 "a[href*='/login']",
                 "a[href*='/account/login']",
-                "a[href*='/auth/login']",
-                "a[href*='login']",
-                "a[href*='/signin']",
-                "a[href*='/sign-in']",
-                # Butoane de login/account
-                "button[class*='login']",
-                "button[class*='account']",
-                "a[class*='login']",
-                "a[class*='account']",
-                # Icoane user/account
-                "a[class*='user']",
-                "a[class*='profile']",
-                "[class*='account'] a",
-                "[class*='login'] a",
-                # Iconuri în header
-                ".header a[href*='account']",
-                ".header a[href*='login']",
-                "header a[href*='account']",
-                "header a[href*='login']",
-                "nav a[href*='account']",
-                "nav a[href*='login']",
-                # SVG user icon
-                "a svg[class*='user']",
-                "a svg[class*='account']",
-            ]
-
-            for selector in login_selectors:
+            ]:
                 try:
                     elements = self.driver.find_elements(
                         By.CSS_SELECTOR, selector
@@ -153,22 +111,14 @@ class XDConnectsScraper(BaseScraper):
                     for el in elements:
                         try:
                             if el.is_displayed():
-                                el_text = el.text.strip().lower()
                                 el_href = (
                                     el.get_attribute('href') or ''
                                 ).lower()
-                                # Verificăm că nu e search sau altceva
                                 if (
                                     'search' not in el_href
                                     and 'cart' not in el_href
                                 ):
                                     login_link = el
-                                    st.info(
-                                        f"✅ XD: Buton login găsit: "
-                                        f"[{selector}] "
-                                        f"text='{el_text}' "
-                                        f"href='{el_href[:50]}'"
-                                    )
                                     break
                         except StaleElementReferenceException:
                             continue
@@ -177,131 +127,31 @@ class XDConnectsScraper(BaseScraper):
                 except Exception:
                     continue
 
-            # Fallback: căutăm prin XPath
-            if not login_link:
-                xpath_selectors = [
-                    "//a[contains(@href, 'login')]",
-                    "//a[contains(@href, 'account')]",
-                    "//a[contains(text(), 'Login')]",
-                    "//a[contains(text(), 'Sign in')]",
-                    "//a[contains(text(), 'Log in')]",
-                    "//button[contains(text(), 'Login')]",
-                    "//button[contains(text(), 'Sign in')]",
-                ]
-                for xpath in xpath_selectors:
-                    try:
-                        el = self.driver.find_element(By.XPATH, xpath)
-                        if el.is_displayed():
-                            login_link = el
-                            st.info(
-                                f"✅ XD: Login găsit prin XPath: "
-                                f"{xpath[:50]}"
-                            )
-                            break
-                    except NoSuchElementException:
-                        continue
-
-            if not login_link:
-                st.warning(
-                    "⚠️ XD: Nu găsesc butonul de login. "
-                    "Încerc URL direct..."
-                )
-                # Încercăm mai multe URL-uri de login
-                login_urls = [
-                    f"{self.base_url}/en-gb/login",
-                    f"{self.base_url}/en-gb/account/login",
-                    f"{self.base_url}/en-gb/auth/login",
-                    f"{self.base_url}/login",
-                    f"{self.base_url}/account/login",
-                ]
-                for login_url in login_urls:
-                    self.driver.get(login_url)
-                    time.sleep(3)
-                    # Verificăm dacă avem câmpuri de login
-                    try:
-                        pwd = self.driver.find_element(
-                            By.CSS_SELECTOR,
-                            "input[type='password']"
-                        )
-                        if pwd.is_displayed():
-                            st.info(
-                                f"✅ XD: Pagină login găsită: "
-                                f"{login_url}"
-                            )
-                            break
-                    except NoSuchElementException:
-                        continue
-            else:
-                # Click pe butonul de login
-                try:
+            if login_link:
+                href = login_link.get_attribute('href')
+                if href:
+                    self.driver.get(href)
+                else:
                     self.driver.execute_script(
                         "arguments[0].click();", login_link
                     )
-                    time.sleep(4)
-                except Exception:
-                    # Dacă e link, navigăm direct
-                    href = login_link.get_attribute('href')
-                    if href:
-                        self.driver.get(href)
-                        time.sleep(4)
+                time.sleep(4)
+            else:
+                self.driver.get(
+                    f"{self.base_url}/en-gb/profile/login"
+                )
+                time.sleep(4)
 
-            # ═══ PASUL 3: Acum ar trebui să vedem formularul ═══
             self._dismiss_cookie_banner()
             time.sleep(1)
 
-            # Debug: vedem ce avem pe pagină
-            current_url = self.driver.current_url
-            st.info(f"📄 XD: URL curent: {current_url[:80]}")
-
-            # Listăm input-urile
-            try:
-                all_inputs = self.driver.find_elements(
-                    By.CSS_SELECTOR,
-                    "input:not([type='hidden'])"
-                )
-                visible_inputs = []
-                for inp in all_inputs:
-                    try:
-                        if inp.is_displayed():
-                            inp_info = (
-                                f"type={inp.get_attribute('type')}, "
-                                f"name={inp.get_attribute('name')}, "
-                                f"id={inp.get_attribute('id')}, "
-                                f"ph={inp.get_attribute('placeholder')}"
-                            )
-                            visible_inputs.append(inp_info)
-                    except Exception:
-                        continue
-                st.info(
-                    f"📋 XD Login: {len(visible_inputs)} inputs: "
-                    f"{visible_inputs[:6]}"
-                )
-            except Exception:
-                pass
-
-            # Screenshot
-            self._save_debug_screenshot("pagina_login")
-
-            # ═══ PASUL 4: Completăm email ═══
+            # Completăm email
             email_field = None
-            email_selectors = [
-                "input[name='username']",
+            for selector in [
+                "input[type='email'][name='email']",
                 "input[name='email']",
-                "input[name='_username']",
                 "input[type='email']",
-                "input[id*='email']",
-                "input[id*='loginMail']",
-                "input[id*='username']",
-                "input[autocomplete='email']",
-                "input[autocomplete='username']",
-                "input[placeholder*='mail']",
-                "input[placeholder*='Mail']",
-                "input[placeholder*='email']",
-                "input[placeholder*='Email']",
-                "input[placeholder*='user']",
-            ]
-
-            for selector in email_selectors:
+            ]:
                 try:
                     fields = self.driver.find_elements(
                         By.CSS_SELECTOR, selector
@@ -313,9 +163,6 @@ class XDConnectsScraper(BaseScraper):
                                 and field.is_enabled()
                             ):
                                 email_field = field
-                                st.info(
-                                    f"✅ XD: Email field: {selector}"
-                                )
                                 break
                         except StaleElementReferenceException:
                             continue
@@ -324,49 +171,10 @@ class XDConnectsScraper(BaseScraper):
                 except Exception:
                     continue
 
-            # Fallback: primul text input din form
             if not email_field:
-                try:
-                    forms = self.driver.find_elements(
-                        By.CSS_SELECTOR, "form"
-                    )
-                    for form in forms:
-                        inputs = form.find_elements(
-                            By.CSS_SELECTOR,
-                            "input[type='text'], input[type='email']"
-                        )
-                        for inp in inputs:
-                            try:
-                                inp_name = (
-                                    inp.get_attribute('name') or ''
-                                )
-                                if (
-                                    inp.is_displayed()
-                                    and inp.is_enabled()
-                                    and 'search' not in inp_name.lower()
-                                    and 'q' != inp_name.lower()
-                                ):
-                                    email_field = inp
-                                    st.info(
-                                        "✅ XD: Email (form fallback)"
-                                    )
-                                    break
-                            except Exception:
-                                continue
-                        if email_field:
-                            break
-                except Exception:
-                    pass
-
-            if not email_field:
-                st.error(
-                    "❌ XD: Nu găsesc câmpul de email! "
-                    "Login imposibil."
-                )
-                self._save_debug_screenshot("ERROR_no_email")
+                st.error("❌ XD: Nu găsesc câmpul de email!")
                 return
 
-            # Completăm email
             self.driver.execute_script(
                 "arguments[0].focus();", email_field
             )
@@ -378,28 +186,20 @@ class XDConnectsScraper(BaseScraper):
             email_field.send_keys(xd_user)
             time.sleep(0.5)
 
-            # ═══ PASUL 5: Completăm parola ═══
+            # Completăm parola
             pass_field = None
             try:
-                pass_fields = self.driver.find_elements(
+                for field in self.driver.find_elements(
                     By.CSS_SELECTOR, "input[type='password']"
-                )
-                for field in pass_fields:
-                    try:
-                        if (
-                            field.is_displayed()
-                            and field.is_enabled()
-                        ):
-                            pass_field = field
-                            break
-                    except StaleElementReferenceException:
-                        continue
+                ):
+                    if field.is_displayed() and field.is_enabled():
+                        pass_field = field
+                        break
             except Exception:
                 pass
 
             if not pass_field:
                 st.error("❌ XD: Nu găsesc câmpul de parolă!")
-                self._save_debug_screenshot("ERROR_no_password")
                 return
 
             self.driver.execute_script(
@@ -413,63 +213,35 @@ class XDConnectsScraper(BaseScraper):
             pass_field.send_keys(xd_pass)
             time.sleep(0.5)
 
-            # ═══ PASUL 6: Submit ═══
+            # Submit
             self._dismiss_cookie_banner()
             time.sleep(0.5)
 
             submitted = False
-            submit_selectors = [
+            for selector in [
                 "form button[type='submit']",
                 "button[type='submit']",
-                "input[type='submit']",
-                "button.btn-primary",
-                "button[class*='login']",
-                "button[class*='submit']",
-            ]
-
-            for selector in submit_selectors:
+            ]:
                 try:
-                    buttons = self.driver.find_elements(
+                    for btn in self.driver.find_elements(
                         By.CSS_SELECTOR, selector
-                    )
-                    for btn in buttons:
-                        try:
-                            if btn.is_displayed():
-                                self.driver.execute_script(
-                                    "arguments[0].click();", btn
-                                )
-                                submitted = True
-                                st.info(
-                                    f"✅ XD: Submit [{selector}]"
-                                )
-                                break
-                        except StaleElementReferenceException:
-                            continue
+                    ):
+                        if btn.is_displayed():
+                            self.driver.execute_script(
+                                "arguments[0].click();", btn
+                            )
+                            submitted = True
+                            break
                     if submitted:
                         break
                 except Exception:
                     continue
 
             if not submitted:
-                try:
-                    pass_field.send_keys(Keys.RETURN)
-                    submitted = True
-                    st.info("✅ XD: Submit cu ENTER")
-                except Exception:
-                    pass
-
-            if not submitted:
-                try:
-                    self.driver.execute_script(
-                        "document.querySelector('form').submit();"
-                    )
-                    submitted = True
-                except Exception:
-                    pass
+                pass_field.send_keys(Keys.RETURN)
 
             time.sleep(6)
 
-            # Verificăm login
             current_url = self.driver.current_url.lower()
             page_source = self.driver.page_source.lower()
 
@@ -477,187 +249,402 @@ class XDConnectsScraper(BaseScraper):
                 'login' not in current_url
                 or 'logout' in page_source
                 or 'account' in page_source
-                or 'my-account' in page_source
-                or 'log out' in page_source
             ):
                 self._logged_in = True
                 st.success("✅ XD: Login reușit!")
             else:
-                if any(
-                    err in page_source
-                    for err in [
-                        'invalid', 'incorrect', 'error',
-                        'wrong', 'failed'
-                    ]
-                ):
-                    st.error("❌ XD: Credențiale incorecte!")
-                else:
-                    st.warning(
-                        "⚠️ XD: Status login neclar, "
-                        "continui oricum..."
-                    )
-                    self._logged_in = True
+                st.warning(
+                    "⚠️ XD: Status login neclar, continui..."
+                )
+                self._logged_in = True
 
         except Exception as e:
             st.error(f"❌ XD login error: {str(e)[:150]}")
 
-    def _extract_color_variants(self, soup) -> list:
-        """Extrage variantele de culoare."""
+    def _extract_colors_with_selenium(self, url: str) -> list:
+        """
+        Extrage culorile direct cu Selenium din pagina live.
+        XD Connects folosește pătrate colorate (swatches)
+        generate cu JS.
+        """
         variants = []
 
-        # Metoda 1: Link-uri cu variantId
-        variant_links = soup.select(
-            'a[href*="variantId"]'
-        )
-        if variant_links:
-            for link in variant_links:
-                v_name = (
-                    link.get('title')
-                    or link.get('aria-label')
-                    or link.get('data-color')
-                    or link.get_text(strip=True)
-                    or ''
-                )
-                v_href = link.get('href', '')
-                v_img = ''
+        if not self.driver:
+            return variants
 
-                img = link.select_one('img')
-                if img:
-                    v_img = (
-                        img.get('data-src')
-                        or img.get('src')
-                        or ''
-                    )
-                else:
-                    style = link.get('style', '')
-                    bg = re.search(
-                        r'background(?:-image)?:\s*url\(["\']?'
-                        r'([^"\')\s]+)',
-                        style
-                    )
-                    if bg:
-                        v_img = bg.group(1)
+        try:
+            # Așteptăm să se încarce culorile
+            time.sleep(2)
 
-                if v_name and v_name not in [
-                    v['name'] for v in variants
-                ]:
-                    variants.append({
-                        'name': v_name,
-                        'url': make_absolute_url(
-                            v_href, self.base_url
-                        ) if v_href else '',
-                        'image': v_img,
-                        'color_code': '',
-                    })
-
-        # Metoda 2: Selectori generici de culoare
-        if not variants:
+            # ═══ METODA 1: Elementele de culoare vizibile ═══
+            # Căutăm toate elementele care ar putea fi swatches
             color_selectors = [
-                '[class*="color-option"]',
-                '[class*="color-selector"] a',
-                '[class*="color-picker"] a',
-                '[class*="swatch"]',
-                '[data-color]',
-                '.product-detail-configurator a',
-                '.product-configurator a',
-                '[class*="variant"] a',
+                # Selectori specifici XD Connects
+                "[class*='colour'] a",
+                "[class*='color'] a",
+                "[class*='Colour'] a",
+                "[class*='Color'] a",
+                "[class*='colour'] button",
+                "[class*='color'] button",
+                "[class*='colour'] div[style]",
+                "[class*='color'] div[style]",
+                "[class*='colour'] span[style]",
+                "[class*='color'] span[style]",
+                # Variant selectors
+                "[class*='variant'] a",
+                "[class*='swatch'] a",
+                "[class*='swatch']",
+                "a[class*='swatch']",
+                # Data attributes
+                "[data-color]",
+                "[data-colour]",
+                "[data-variant-color]",
+                # Link-uri cu variantId
+                "a[href*='variantId']",
+                # Pătrate colorate generice
+                "[class*='color-box']",
+                "[class*='colour-box']",
+                "[class*='color-square']",
+                "[class*='colour-square']",
+                "[class*='color-circle']",
+                "[class*='colour-circle']",
+                "[class*='color-item']",
+                "[class*='colour-item']",
+                "[class*='color-option']",
+                "[class*='colour-option']",
             ]
-            for sel in color_selectors:
-                elements = soup.select(sel)
-                if elements:
-                    for el in elements:
-                        v_name = (
-                            el.get('title')
-                            or el.get('aria-label')
-                            or el.get('data-color')
-                            or el.get('data-name')
-                            or el.get_text(strip=True)
-                            or ''
-                        )
-                        v_href = el.get('href', '')
-                        v_img = ''
 
-                        img = el.select_one('img')
-                        if img:
-                            v_img = (
-                                img.get('data-src')
-                                or img.get('src')
-                                or ''
-                            )
+            found_elements = []
 
-                        if v_name and v_name not in [
-                            v['name'] for v in variants
-                        ]:
-                            variants.append({
-                                'name': v_name,
-                                'url': make_absolute_url(
-                                    v_href, self.base_url
-                                ) if v_href else '',
-                                'image': v_img,
-                                'color_code': (
-                                    el.get('data-color-code')
-                                    or el.get('data-value')
-                                    or ''
-                                ),
-                            })
-                    if variants:
-                        break
-
-        # Metoda 3: Select dropdown
-        if not variants:
-            for sel in [
-                'select[name*="color"]',
-                'select[id*="color"]',
-                'select[name*="variant"]',
-            ]:
-                select = soup.select_one(sel)
-                if select:
-                    for opt in select.select('option'):
-                        val = opt.get('value', '')
-                        text = opt.get_text(strip=True)
-                        if val and text and text != '--':
-                            variants.append({
-                                'name': text,
-                                'url': '',
-                                'image': '',
-                                'color_code': val,
-                            })
-                    if variants:
-                        break
-
-        # Metoda 4: JSON în pagină
-        if not variants:
-            scripts = soup.select('script')
-            for script in scripts:
-                script_text = script.string or ''
-                if 'variant' in script_text.lower():
-                    # Căutăm array-uri JSON cu variante
-                    json_matches = re.findall(
-                        r'\{[^{}]*"color"[^{}]*\}',
-                        script_text
+            for selector in color_selectors:
+                try:
+                    elements = self.driver.find_elements(
+                        By.CSS_SELECTOR, selector
                     )
-                    for match in json_matches[:10]:
+                    visible_elements = []
+                    for el in elements:
                         try:
-                            data = json_lib.loads(match)
-                            color = (
-                                data.get('color')
-                                or data.get('name')
-                                or data.get('label')
+                            if el.is_displayed():
+                                visible_elements.append(el)
+                        except StaleElementReferenceException:
+                            continue
+
+                    if visible_elements:
+                        found_elements = visible_elements
+                        st.info(
+                            f"🎨 XD: {len(visible_elements)} "
+                            f"culori găsite cu [{selector}]"
+                        )
+                        break
+                except Exception:
+                    continue
+
+            # ═══ METODA 2: Căutare prin JavaScript ═══
+            if not found_elements:
+                try:
+                    js_result = self.driver.execute_script("""
+                        var results = [];
+
+                        // Căutăm secțiunea Colour
+                        var allElements = document.querySelectorAll('*');
+                        var colourSection = null;
+
+                        for (var i = 0; i < allElements.length; i++) {
+                            var text = allElements[i].textContent.trim();
+                            if (text === 'Colour:' || text === 'Color:' ||
+                                text === 'Colour' || text === 'Color') {
+                                colourSection = allElements[i].parentElement;
+                                break;
+                            }
+                        }
+
+                        if (colourSection) {
+                            // Găsim elementele clickabile din secțiunea
+                            // de culori (pătrate, linkuri, etc.)
+                            var clickables = colourSection.querySelectorAll(
+                                'a, button, [role="button"], ' +
+                                'div[style*="background"], ' +
+                                'span[style*="background"]'
+                            );
+
+                            clickables.forEach(function(el) {
+                                var info = {
+                                    tag: el.tagName,
+                                    title: el.getAttribute('title') || '',
+                                    ariaLabel: el.getAttribute('aria-label') || '',
+                                    dataColor: el.getAttribute('data-color') || '',
+                                    href: el.getAttribute('href') || '',
+                                    style: el.getAttribute('style') || '',
+                                    text: el.textContent.trim().substring(0, 30),
+                                    className: el.className || '',
+                                    bgColor: window.getComputedStyle(el).backgroundColor
+                                };
+                                results.push(info);
+                            });
+                        }
+
+                        // Fallback: căutăm orice cu background-color
+                        // care pare un swatch
+                        if (results.length === 0) {
+                            var allA = document.querySelectorAll(
+                                'a[href*="variantId"]'
+                            );
+                            allA.forEach(function(el) {
+                                var info = {
+                                    tag: 'A',
+                                    title: el.getAttribute('title') || '',
+                                    ariaLabel: el.getAttribute('aria-label') || '',
+                                    dataColor: el.getAttribute('data-color') || '',
+                                    href: el.getAttribute('href') || '',
+                                    style: el.getAttribute('style') || '',
+                                    text: el.textContent.trim().substring(0, 30),
+                                    className: el.className || '',
+                                    bgColor: window.getComputedStyle(el).backgroundColor
+                                };
+                                results.push(info);
+                            });
+                        }
+
+                        return results;
+                    """)
+
+                    if js_result:
+                        st.info(
+                            f"🎨 XD JS: {len(js_result)} elemente "
+                            f"de culoare găsite"
+                        )
+
+                        for item in js_result:
+                            color_name = (
+                                item.get('title')
+                                or item.get('ariaLabel')
+                                or item.get('dataColor')
+                                or item.get('text')
+                                or ''
+                            ).strip()
+
+                            color_url = item.get('href', '')
+
+                            # Dacă nu are nume, încercăm să
+                            # extragem din background-color
+                            if not color_name:
+                                bg = item.get('bgColor', '')
+                                if bg and bg != 'rgba(0, 0, 0, 0)':
+                                    color_name = f"Color ({bg})"
+
+                            if (
+                                color_name
+                                and color_name not in [
+                                    v['name'] for v in variants
+                                ]
+                            ):
+                                variants.append({
+                                    'name': color_name,
+                                    'url': make_absolute_url(
+                                        color_url, self.base_url
+                                    ) if color_url else '',
+                                    'image': '',
+                                    'color_code': (
+                                        item.get('dataColor', '')
+                                    ),
+                                })
+
+                except Exception as e:
+                    st.warning(
+                        f"⚠️ XD JS color extract: {str(e)[:80]}"
+                    )
+
+            # ═══ METODA 3: Procesăm elementele găsite cu Selenium ═══
+            if found_elements and not variants:
+                for el in found_elements:
+                    try:
+                        color_name = ''
+                        color_url = ''
+                        color_img = ''
+
+                        # Nume culoare
+                        color_name = (
+                            el.get_attribute('title')
+                            or el.get_attribute('aria-label')
+                            or el.get_attribute('data-color')
+                            or el.get_attribute('data-colour')
+                            or el.get_attribute('data-name')
+                            or ''
+                        ).strip()
+
+                        # URL
+                        color_url = (
+                            el.get_attribute('href') or ''
+                        ).strip()
+
+                        # Imagine
+                        try:
+                            img = el.find_element(
+                                By.CSS_SELECTOR, 'img'
+                            )
+                            color_img = (
+                                img.get_attribute('data-src')
+                                or img.get_attribute('src')
                                 or ''
                             )
-                            if color and color not in [
+                        except NoSuchElementException:
+                            pass
+
+                        # Dacă nu avem nume, luăm background-color
+                        if not color_name:
+                            try:
+                                bg_color = el.value_of_css_property(
+                                    'background-color'
+                                )
+                                if (
+                                    bg_color
+                                    and bg_color != 'rgba(0, 0, 0, 0)'
+                                    and bg_color != 'transparent'
+                                ):
+                                    color_name = f"Color ({bg_color})"
+                            except Exception:
+                                pass
+
+                        # Dacă nu avem nume, luăm din text
+                        if not color_name:
+                            try:
+                                color_name = el.text.strip()[:30]
+                            except Exception:
+                                pass
+
+                        if (
+                            color_name
+                            and color_name not in [
+                                v['name'] for v in variants
+                            ]
+                        ):
+                            variants.append({
+                                'name': color_name,
+                                'url': make_absolute_url(
+                                    color_url, self.base_url
+                                ) if color_url else '',
+                                'image': color_img,
+                                'color_code': '',
+                            })
+
+                    except StaleElementReferenceException:
+                        continue
+                    except Exception:
+                        continue
+
+            # ═══ METODA 4: Extragem din URL-urile variantelor ═══
+            if not variants:
+                try:
+                    variant_links = self.driver.find_elements(
+                        By.CSS_SELECTOR,
+                        "a[href*='variantId']"
+                    )
+                    for link in variant_links:
+                        try:
+                            if not link.is_displayed():
+                                continue
+
+                            v_name = (
+                                link.get_attribute('title')
+                                or link.get_attribute('aria-label')
+                                or ''
+                            ).strip()
+
+                            v_href = (
+                                link.get_attribute('href') or ''
+                            )
+
+                            if not v_name:
+                                # Extragem variantId din href
+                                vid_match = re.search(
+                                    r'variantId=([^&]+)', v_href
+                                )
+                                if vid_match:
+                                    v_name = vid_match.group(1)
+
+                            if (
+                                v_name
+                                and v_name not in [
+                                    v['name'] for v in variants
+                                ]
+                            ):
+                                variants.append({
+                                    'name': v_name,
+                                    'url': v_href,
+                                    'image': '',
+                                    'color_code': '',
+                                })
+
+                        except StaleElementReferenceException:
+                            continue
+                except Exception:
+                    pass
+
+            # ═══ METODA 5: Extragem din page source cu regex ═══
+            if not variants:
+                try:
+                    page_source = self.driver.page_source
+
+                    # Căutăm JSON cu variante
+                    variant_patterns = [
+                        r'"variants?":\s*\[(.*?)\]',
+                        r'"colors?":\s*\[(.*?)\]',
+                        r'"colours?":\s*\[(.*?)\]',
+                    ]
+
+                    for pattern in variant_patterns:
+                        matches = re.findall(
+                            pattern, page_source, re.DOTALL
+                        )
+                        for match in matches:
+                            # Extragem name/label din JSON
+                            names = re.findall(
+                                r'"(?:name|label|color|colour)"'
+                                r'\s*:\s*"([^"]+)"',
+                                match
+                            )
+                            for name in names:
+                                if (
+                                    name
+                                    and name not in [
+                                        v['name'] for v in variants
+                                    ]
+                                    and len(name) < 30
+                                ):
+                                    variants.append({
+                                        'name': name,
+                                        'url': '',
+                                        'image': '',
+                                        'color_code': '',
+                                    })
+                        if variants:
+                            break
+
+                    # Căutăm variantId-uri unice în linkuri
+                    if not variants:
+                        variant_ids = re.findall(
+                            r'variantId=([A-Z0-9.]+)',
+                            page_source
+                        )
+                        unique_ids = list(dict.fromkeys(variant_ids))
+                        for vid in unique_ids:
+                            if vid not in [
                                 v['name'] for v in variants
                             ]:
                                 variants.append({
-                                    'name': color,
-                                    'url': data.get('url', ''),
-                                    'image': data.get('image', ''),
-                                    'color_code': (
-                                        data.get('code', '')
-                                    ),
+                                    'name': vid,
+                                    'url': '',
+                                    'image': '',
+                                    'color_code': vid,
                                 })
-                        except Exception:
-                            continue
+
+                except Exception:
+                    pass
+
+        except Exception as e:
+            st.warning(
+                f"⚠️ XD color extraction error: {str(e)[:80]}"
+            )
 
         return variants
 
@@ -666,26 +653,50 @@ class XDConnectsScraper(BaseScraper):
         try:
             self._login_if_needed()
 
-            soup = self.get_page(
-                url,
-                wait_selector=(
-                    'h1, .product-detail, .product-info, '
-                    '[class*="product"]'
-                ),
-                prefer_selenium=True
+            # Navigăm la produs cu Selenium
+            self._init_driver()
+            if not self.driver:
+                return None
+
+            st.info(f"📦 XD: Scrapez {url[:70]}...")
+            self.driver.get(url)
+            time.sleep(5)
+
+            self._dismiss_cookie_banner()
+            time.sleep(1)
+
+            # Scroll complet pentru lazy loading
+            self.driver.execute_script(
+                "window.scrollTo(0, document.body.scrollHeight/3);"
             )
+            time.sleep(1)
+            self.driver.execute_script(
+                "window.scrollTo(0, document.body.scrollHeight/2);"
+            )
+            time.sleep(1)
+            self.driver.execute_script(
+                "window.scrollTo(0, document.body.scrollHeight);"
+            )
+            time.sleep(1)
+            self.driver.execute_script(
+                "window.scrollTo(0, 0);"
+            )
+            time.sleep(1)
+
+            # Parsăm cu BeautifulSoup
+            from bs4 import BeautifulSoup
+            page_source = self.driver.page_source
+            soup = BeautifulSoup(page_source, 'html.parser')
+
             if not soup:
                 return None
 
             # ═══ NUME ═══
             name = ""
             for sel in [
-                'h1.product-detail-name',
+                'h1', 'h1.product-detail-name',
                 'h1.product-name',
-                'h1[class*="product"]',
                 '.product-detail h1',
-                '.product-info h1',
-                'h1',
             ]:
                 el = soup.select_one(sel)
                 if el and el.get_text(strip=True):
@@ -695,49 +706,94 @@ class XDConnectsScraper(BaseScraper):
             if not name:
                 name = "Produs XD Connects"
 
-            # ═══ SKU ═══
+            # ═══ SKU / Item no. ═══
             sku = ""
-            sku_match = re.search(r'([pP]\d{3}\.\d{2,3})', url)
-            if sku_match:
-                sku = sku_match.group(1).upper()
 
-            for sel in [
-                '.product-detail-sku', '.product-sku',
-                '[class*="sku"]', '[class*="article-number"]',
-                '[class*="product-id"]',
-            ]:
-                el = soup.select_one(sel)
-                if el:
-                    sku_text = el.get_text(strip=True)
-                    if sku_text:
-                        sku = sku_text
-                    break
+            # Din pagină - "Item no. P705.709"
+            item_no_pattern = re.search(
+                r'Item\s*no\.?\s*:?\s*([A-Z0-9.]+)',
+                page_source, re.IGNORECASE
+            )
+            if item_no_pattern:
+                sku = item_no_pattern.group(1).upper()
+
+            # Din URL
+            if not sku:
+                sku_match = re.search(
+                    r'([pP]\d{3}\.\d{2,3})', url
+                )
+                if sku_match:
+                    sku = sku_match.group(1).upper()
+
+            # Din HTML
+            if not sku:
+                for sel in [
+                    '.product-detail-sku', '.product-sku',
+                    '[class*="sku"]', '[class*="article"]',
+                    '[class*="item-no"]',
+                ]:
+                    el = soup.select_one(sel)
+                    if el:
+                        sku_text = el.get_text(strip=True)
+                        if sku_text:
+                            # Extragem doar codul
+                            code = re.search(
+                                r'([A-Z]\d{3}[\d.]+)',
+                                sku_text, re.IGNORECASE
+                            )
+                            sku = (
+                                code.group(1).upper()
+                                if code
+                                else sku_text
+                            )
+                        break
 
             # ═══ PREȚ ═══
             price = 0.0
-            for sel in [
-                '.product-detail-price', '.product-price',
-                '[class*="price"] .price', '[class*="price"]',
-                '.price',
-            ]:
-                el = soup.select_one(sel)
-                if el:
-                    price = clean_price(el.get_text(strip=True))
-                    if price > 0:
-                        break
+
+            # Din pagină - "375,00 RON" sau "From 375,00 RON"
+            price_pattern = re.search(
+                r'(?:From\s+)?(\d+[.,]\d{2})\s*RON',
+                page_source, re.IGNORECASE
+            )
+            if price_pattern:
+                price = clean_price(price_pattern.group(1))
+
+            if price <= 0:
+                for sel in [
+                    '.product-detail-price', '.product-price',
+                    '[class*="price"]', '.price',
+                ]:
+                    el = soup.select_one(sel)
+                    if el:
+                        price = clean_price(
+                            el.get_text(strip=True)
+                        )
+                        if price > 0:
+                            break
 
             # ═══ DESCRIERE ═══
             description = ""
+
+            # Extrage descrierea scurtă (ex: "rPET • Volume 10.5L • ...")
+            short_desc_pattern = re.search(
+                r'((?:rPET|PVC|recycled|anti-theft)[^<]{10,200})',
+                page_source, re.IGNORECASE
+            )
+            if short_desc_pattern:
+                description = short_desc_pattern.group(1).strip()
+
             for sel in [
                 '.product-detail-description',
                 '.product-description',
                 '[class*="description"]',
                 '.product-detail-body',
-                '#product-description',
             ]:
                 el = soup.select_one(sel)
                 if el:
-                    description = str(el)
+                    desc_text = str(el)
+                    if len(desc_text) > len(description):
+                        description = desc_text
                     break
 
             # ═══ SPECIFICAȚII ═══
@@ -746,10 +802,9 @@ class XDConnectsScraper(BaseScraper):
                 '.product-detail-properties',
                 '.product-properties',
                 '.product-specifications',
-                'table.specifications',
+                'table',
                 '[class*="specification"]',
                 '[class*="properties"]',
-                'table',
             ]:
                 container = soup.select_one(sel)
                 if container:
@@ -761,7 +816,6 @@ class XDConnectsScraper(BaseScraper):
                             val = cells[1].get_text(strip=True)
                             if key and val:
                                 specifications[key] = val
-
                     if not specifications:
                         dts = container.select('dt')
                         dds = container.select('dd')
@@ -770,31 +824,36 @@ class XDConnectsScraper(BaseScraper):
                             val = dd.get_text(strip=True)
                             if key and val:
                                 specifications[key] = val
-
                     if specifications:
                         break
 
+            # Extrage din "Recommended sales price" table
+            price_table = re.findall(
+                r'(\d+)\s+(\d+[.,]\d{2})\s*RON',
+                page_source
+            )
+            if price_table:
+                specifications['Preț recomandat'] = (
+                    f"{price_table[0][1]} RON "
+                    f"(cantitate: {price_table[0][0]})"
+                )
+
             # ═══ IMAGINI ═══
             images = []
-            for sel in [
-                '.product-detail-images img',
-                '.product-gallery img',
-                '.product-images img',
-                '[class*="gallery"] img',
-                '[class*="product-image"] img',
-                '.product-detail img',
-                '.product-media img',
-                '[class*="carousel"] img',
-                '[class*="slider"] img',
-            ]:
-                imgs = soup.select(sel)
-                if imgs:
-                    for img in imgs:
+
+            # Metoda 1: Selenium - imagini vizibile
+            try:
+                img_elements = self.driver.find_elements(
+                    By.CSS_SELECTOR,
+                    "img[src*='product'], img[src*='media'], "
+                    "img[src*='image'], img[data-src*='product'], "
+                    "img[data-src*='media']"
+                )
+                for img_el in img_elements:
+                    try:
                         src = (
-                            img.get('data-src')
-                            or img.get('src')
-                            or img.get('data-lazy')
-                            or img.get('data-zoom-image')
+                            img_el.get_attribute('data-src')
+                            or img_el.get_attribute('src')
                             or ''
                         )
                         if (
@@ -802,14 +861,53 @@ class XDConnectsScraper(BaseScraper):
                             and 'placeholder' not in src.lower()
                             and 'icon' not in src.lower()
                             and 'logo' not in src.lower()
+                            and 'flag' not in src.lower()
+                            and 'co2' not in src.lower()
                         ):
                             abs_url = make_absolute_url(
                                 src, self.base_url
                             )
                             if abs_url not in images:
                                 images.append(abs_url)
-                    if images:
-                        break
+                    except StaleElementReferenceException:
+                        continue
+            except Exception:
+                pass
+
+            # Metoda 2: BeautifulSoup
+            if not images:
+                for sel in [
+                    '.product-detail-images img',
+                    '.product-gallery img',
+                    '.product-images img',
+                    '[class*="gallery"] img',
+                    '[class*="product-image"] img',
+                    '.product-detail img',
+                    '.product-media img',
+                ]:
+                    imgs = soup.select(sel)
+                    if imgs:
+                        for img in imgs:
+                            src = (
+                                img.get('data-src')
+                                or img.get('src')
+                                or img.get('data-lazy')
+                                or ''
+                            )
+                            if (
+                                src
+                                and 'placeholder' not in src.lower()
+                                and 'icon' not in src.lower()
+                                and 'logo' not in src.lower()
+                                and 'co2' not in src.lower()
+                            ):
+                                abs_url = make_absolute_url(
+                                    src, self.base_url
+                                )
+                                if abs_url not in images:
+                                    images.append(abs_url)
+                        if images:
+                            break
 
             # Fallback imagini
             if not images:
@@ -820,9 +918,7 @@ class XDConnectsScraper(BaseScraper):
                     )
                     if src and any(
                         kw in src.lower()
-                        for kw in [
-                            'product', 'media', 'upload', 'image'
-                        ]
+                        for kw in ['product', 'media', 'upload']
                     ):
                         abs_url = make_absolute_url(
                             src, self.base_url
@@ -831,20 +927,26 @@ class XDConnectsScraper(BaseScraper):
                             abs_url not in images
                             and 'icon' not in abs_url.lower()
                             and 'logo' not in abs_url.lower()
-                            and 'flag' not in abs_url.lower()
                         ):
                             images.append(abs_url)
 
-            # ═══ VARIANTE DE CULOARE ═══
-            color_variants = self._extract_color_variants(soup)
+            # ═══ VARIANTE DE CULOARE (cu Selenium) ═══
+            color_variants = self._extract_colors_with_selenium(url)
 
             colors = []
             variant_images = {}
 
             if color_variants:
                 st.info(
-                    f"🎨 XD: {len(color_variants)} variante "
-                    f"culoare: {name[:40]}"
+                    f"🎨 XD: {len(color_variants)} culori: "
+                    + ", ".join(
+                        [v['name'] for v in color_variants[:5]]
+                    )
+                    + (
+                        "..."
+                        if len(color_variants) > 5
+                        else ""
+                    )
                 )
                 for v in color_variants:
                     if v['name']:
@@ -856,27 +958,6 @@ class XDConnectsScraper(BaseScraper):
                         variant_images[v['name']] = abs_img
                         if abs_img not in images:
                             images.append(abs_img)
-
-            # Fallback culori
-            if not colors:
-                for sel in [
-                    '.color-selector a',
-                    '[class*="color"] [class*="option"]',
-                    '.color-picker a',
-                    '[data-color]',
-                ]:
-                    color_els = soup.select(sel)
-                    for el in color_els:
-                        c = (
-                            el.get('title')
-                            or el.get('aria-label')
-                            or el.get('data-color')
-                            or el.get_text(strip=True)
-                        )
-                        if c and c not in colors and len(c) < 30:
-                            colors.append(c)
-                    if colors:
-                        break
 
             # ═══ CONSTRUIM PRODUSUL ═══
             product = self._build_product(
@@ -890,10 +971,18 @@ class XDConnectsScraper(BaseScraper):
                 source_url=url,
                 source_site=self.name,
                 category='Rucsacuri Anti-Furt',
+                currency='RON',
             )
 
             product['color_variants'] = color_variants
             product['variant_images'] = variant_images
+
+            st.info(
+                f"📦 XD: {name[:40]} | SKU: {sku} | "
+                f"Preț: {price} RON | "
+                f"Culori: {len(colors)} | "
+                f"Imagini: {len(images)}"
+            )
 
             return product
 
