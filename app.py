@@ -11,6 +11,7 @@ import pandas as pd
 import streamlit as st
 from utils.helpers import match_scraper, format_product_for_display
 from utils.translator import translate_product_data
+from utils.image_handler import make_absolute_url
 from scrapers import get_scraper
 from gomag.importer import GomagImporter
 
@@ -278,7 +279,9 @@ if st.session_state.step == 1:
 
                 # Reutilizăm scraperul pentru același site
                 if scraper_name not in active_scrapers:
-                    active_scrapers[scraper_name] = get_scraper(scraper_name)
+                    active_scrapers[scraper_name] = get_scraper(
+                        scraper_name
+                    )
 
                 scraper = active_scrapers[scraper_name]
 
@@ -289,7 +292,8 @@ if st.session_state.step == 1:
                         # Traducere dacă e activată
                         if translate_option:
                             status_text.text(
-                                f"🌍 Traduc produsul {i + 1}/{total}..."
+                                f"🌍 Traduc produsul "
+                                f"{i + 1}/{total}..."
                             )
                             try:
                                 product = translate_product_data(product)
@@ -303,12 +307,20 @@ if st.session_state.step == 1:
                         st.session_state.scraped_products.append(product)
 
                         with results_container:
+                            colors_info = ""
+                            if product.get('colors'):
+                                colors_info = (
+                                    f" | 🎨 {len(product['colors'])} "
+                                    f"culori"
+                                )
                             st.success(
                                 f"✅ [{i + 1}/{total}] "
                                 f"{product.get('name', 'N/A')} "
                                 f"| Preț: "
-                                f"{product.get('final_price', 0):.2f} LEI "
+                                f"{product.get('final_price', 0):.2f}"
+                                f" LEI "
                                 f"| SKU: {product.get('sku', 'N/A')}"
+                                f"{colors_info}"
                             )
                     else:
                         with results_container:
@@ -320,7 +332,8 @@ if st.session_state.step == 1:
                 except Exception as e:
                     with results_container:
                         st.error(
-                            f"❌ [{i + 1}/{total}] Eroare: {str(e)[:100]}"
+                            f"❌ [{i + 1}/{total}] "
+                            f"Eroare: {str(e)[:100]}"
                         )
 
                 # Delay între request-uri
@@ -354,17 +367,32 @@ if st.session_state.step == 1:
         )
 
         for idx, product in enumerate(st.session_state.scraped_products):
-            with st.expander(
+            # Construim label-ul expander-ului
+            colors_count = len(product.get('colors', []))
+            images_count = len(product.get('images', []))
+            variant_count = len(product.get('color_variants', []))
+
+            expander_label = (
                 f"{'✅' if product.get('status') == 'scraped' else '⚠️'} "
                 f"{product.get('name', 'N/A')} | "
                 f"SKU: {product.get('sku', 'N/A')} | "
                 f"Preț: {product.get('final_price', 0):.2f} LEI"
-            ):
+            )
+            if colors_count > 0:
+                expander_label += f" | 🎨 {colors_count} culori"
+            if images_count > 0:
+                expander_label += f" | 📷 {images_count} img"
+
+            with st.expander(expander_label):
                 col_info, col_img = st.columns([2, 1])
 
                 with col_info:
-                    st.write(f"**Nume:** {product.get('name', 'N/A')}")
-                    st.write(f"**SKU:** {product.get('sku', 'N/A')}")
+                    st.write(
+                        f"**Nume:** {product.get('name', 'N/A')}"
+                    )
+                    st.write(
+                        f"**SKU:** {product.get('sku', 'N/A')}"
+                    )
                     st.write(
                         f"**Preț original:** "
                         f"{product.get('original_price', 0):.2f} "
@@ -374,20 +402,85 @@ if st.session_state.step == 1:
                         f"**Preț final (x2):** "
                         f"{product.get('final_price', 0):.2f} LEI"
                     )
-                    st.write(f"**Stoc:** {product.get('stock', 1)}")
                     st.write(
-                        f"**Sursă:** {product.get('source_site', 'N/A')}"
+                        f"**Stoc:** {product.get('stock', 1)}"
+                    )
+                    st.write(
+                        f"**Sursă:** "
+                        f"{product.get('source_site', 'N/A')}"
                     )
                     st.write(
                         f"**URL:** {product.get('source_url', '')}"
                     )
 
+                    # Material
+                    if product.get('material'):
+                        st.write(
+                            f"**Material:** "
+                            f"{product.get('material')}"
+                        )
+
+                    # Dimensiuni
+                    if product.get('dimensions'):
+                        st.write(
+                            f"**Dimensiuni:** "
+                            f"{product.get('dimensions')}"
+                        )
+
+                    # Greutate
+                    if product.get('weight'):
+                        st.write(
+                            f"**Greutate:** "
+                            f"{product.get('weight')}"
+                        )
+
+                    # Culori
                     if product.get('colors'):
                         st.write(
-                            f"**Culori:** "
+                            f"**Culori ({len(product['colors'])}):** "
                             f"{', '.join(product['colors'])}"
                         )
 
+                    # Variante de culoare cu imagini
+                    if product.get('color_variants'):
+                        st.write(
+                            f"**Variante culoare:** "
+                            f"{len(product['color_variants'])}"
+                        )
+                        num_cols = min(
+                            len(product['color_variants']), 4
+                        )
+                        if num_cols > 0:
+                            variant_cols = st.columns(num_cols)
+                            for vi, variant in enumerate(
+                                product['color_variants'][:8]
+                            ):
+                                col_idx = vi % num_cols
+                                with variant_cols[col_idx]:
+                                    v_name = variant.get(
+                                        'name', 'N/A'
+                                    )
+                                    if variant.get('image'):
+                                        try:
+                                            img_url = make_absolute_url(
+                                                variant['image'],
+                                                product.get(
+                                                    'source_url', ''
+                                                )
+                                            )
+                                            st.image(
+                                                img_url,
+                                                caption=v_name,
+                                                width=80,
+                                            )
+                                        except Exception:
+                                            st.write(
+                                                f"🎨 {v_name}"
+                                            )
+                                    else:
+                                        st.write(f"🎨 {v_name}")
+
+                    # Specificații
                     if product.get('specifications'):
                         st.write("**Specificații:**")
                         for k, v in product['specifications'].items():
@@ -396,74 +489,142 @@ if st.session_state.step == 1:
                 with col_img:
                     images = product.get('images', [])
                     if images:
+                        # Afișăm prima imagine mare
                         try:
                             st.image(
                                 images[0],
                                 caption="Imagine principală",
-                                width=200
+                                width=250
                             )
                         except Exception:
                             st.write(f"🖼️ {images[0][:60]}...")
+
+                        # Afișăm restul ca thumbnails
                         if len(images) > 1:
-                            st.write(f"📷 +{len(images) - 1} imagini")
+                            st.write(
+                                f"📷 +{len(images) - 1} imagini:"
+                            )
+                            thumb_cols = st.columns(
+                                min(len(images) - 1, 3)
+                            )
+                            for img_i, img_url in enumerate(
+                                images[1:6]
+                            ):
+                                col_idx = img_i % min(
+                                    len(images) - 1, 3
+                                )
+                                with thumb_cols[col_idx]:
+                                    try:
+                                        st.image(
+                                            img_url,
+                                            width=80,
+                                        )
+                                    except Exception:
+                                        st.write("🖼️")
+                            if len(images) > 6:
+                                st.write(
+                                    f"... și încă "
+                                    f"{len(images) - 6} imagini"
+                                )
+                    else:
+                        st.write("❌ Fără imagini")
 
                 # Editare inline
+                st.markdown("---")
                 with st.form(key=f"edit_product_{idx}"):
-                    new_name = st.text_input(
-                        "Editează numele:",
-                        value=product.get('name', ''),
-                        key=f"name_{idx}"
-                    )
-                    new_price = st.number_input(
-                        "Editează prețul (LEI):",
-                        value=float(product.get('final_price', 1.0)),
-                        min_value=0.01,
-                        step=0.01,
-                        key=f"price_{idx}"
-                    )
-                    new_sku = st.text_input(
-                        "Editează SKU:",
-                        value=product.get('sku', ''),
-                        key=f"sku_{idx}"
+                    edit_col1, edit_col2, edit_col3 = st.columns(3)
+
+                    with edit_col1:
+                        new_name = st.text_input(
+                            "Editează numele:",
+                            value=product.get('name', ''),
+                            key=f"name_{idx}"
+                        )
+                    with edit_col2:
+                        new_price = st.number_input(
+                            "Editează prețul (LEI):",
+                            value=float(
+                                product.get('final_price', 1.0)
+                            ),
+                            min_value=0.01,
+                            step=0.01,
+                            key=f"price_{idx}"
+                        )
+                    with edit_col3:
+                        new_sku = st.text_input(
+                            "Editează SKU:",
+                            value=product.get('sku', ''),
+                            key=f"sku_{idx}"
+                        )
+
+                    # Editare descriere
+                    new_desc = st.text_area(
+                        "Editează descrierea:",
+                        value=product.get('description', '')[:500],
+                        height=100,
+                        key=f"desc_{idx}"
                     )
 
-                    if st.form_submit_button("💾 Salvează modificările"):
-                        st.session_state.scraped_products[idx]['name'] = (
-                            new_name
-                        )
+                    if st.form_submit_button(
+                        "💾 Salvează modificările"
+                    ):
+                        st.session_state.scraped_products[idx][
+                            'name'
+                        ] = new_name
                         st.session_state.scraped_products[idx][
                             'final_price'
                         ] = new_price
-                        st.session_state.scraped_products[idx]['sku'] = (
-                            new_sku
-                        )
+                        st.session_state.scraped_products[idx][
+                            'sku'
+                        ] = new_sku
+                        if new_desc:
+                            st.session_state.scraped_products[idx][
+                                'description'
+                            ] = new_desc
                         st.success("✅ Modificări salvate!")
                         st.rerun()
 
         # Buton pentru a trece la pasul 2
         st.markdown("---")
-        if st.button(
-            "➡️ Continuă la Pasul 2: Import în Gomag",
-            type="primary",
-            use_container_width=True,
-        ):
-            st.session_state.translated_products = (
-                st.session_state.scraped_products.copy()
-            )
-            st.session_state.step = 2
-            st.rerun()
 
-        # Export JSON
+        col_next1, col_next2 = st.columns(2)
+
+        with col_next1:
+            if st.button(
+                "➡️ Continuă la Pasul 2: Import în Gomag",
+                type="primary",
+                use_container_width=True,
+            ):
+                st.session_state.translated_products = (
+                    st.session_state.scraped_products.copy()
+                )
+                st.session_state.step = 2
+                st.rerun()
+
+        with col_next2:
+            # Selectare/deselectare toate
+            if st.button(
+                "🗑️ Șterge toate produsele extrase",
+                type="secondary",
+                use_container_width=True,
+            ):
+                st.session_state.scraped_products = []
+                st.session_state.translated_products = []
+                st.rerun()
+
+        # Export
         st.markdown("---")
         st.subheader("💾 Export Date")
 
         col_export1, col_export2 = st.columns(2)
 
         with col_export1:
+            # Export JSON
             json_data = json.dumps(
                 st.session_state.scraped_products,
                 indent=2,
                 ensure_ascii=False,
+                default=str,
             )
             st.download_button(
                 label="📥 Descarcă JSON cu produsele extrase",
@@ -473,7 +634,7 @@ if st.session_state.step == 1:
             )
 
         with col_export2:
-            # Export ca Excel
+            # Export Excel
             export_data = []
             for p in st.session_state.scraped_products:
                 export_data.append({
@@ -484,14 +645,22 @@ if st.session_state.step == 1:
                     'Preț Final LEI': p.get('final_price', 0),
                     'Stoc': p.get('stock', 1),
                     'Culori': ', '.join(p.get('colors', [])),
-                    'Imagini': ' | '.join(p.get('images', [])[:5]),
+                    'Nr Variante': len(
+                        p.get('color_variants', [])
+                    ),
+                    'Nr Imagini': len(p.get('images', [])),
+                    'Imagini': ' | '.join(
+                        p.get('images', [])[:5]
+                    ),
                     'Sursă': p.get('source_url', ''),
                     'Site': p.get('source_site', ''),
                 })
 
             df_export = pd.DataFrame(export_data)
             excel_buffer = io.BytesIO()
-            df_export.to_excel(excel_buffer, index=False, engine='openpyxl')
+            df_export.to_excel(
+                excel_buffer, index=False, engine='openpyxl'
+            )
             excel_buffer.seek(0)
 
             st.download_button(
@@ -536,7 +705,8 @@ elif st.session_state.step == 2:
                 if isinstance(imported, list) and imported:
                     st.session_state.translated_products = imported
                     st.success(
-                        f"✅ {len(imported)} produse importate din JSON"
+                        f"✅ {len(imported)} produse importate "
+                        f"din JSON"
                     )
                     st.rerun()
             except Exception as e:
@@ -563,7 +733,8 @@ elif st.session_state.step == 2:
                     st.session_state.translated_products = imported
                     products = imported
                     st.success(
-                        f"✅ {len(imported)} produse importate din JSON"
+                        f"✅ {len(imported)} produse importate "
+                        f"din JSON"
                     )
                     st.rerun()
             except Exception as e:
@@ -577,7 +748,10 @@ elif st.session_state.step == 2:
     col_cat1, col_cat2 = st.columns(2)
 
     with col_cat1:
-        if st.button("🔄 Obține Categorii din Gomag", type="secondary"):
+        if st.button(
+            "🔄 Obține Categorii din Gomag",
+            type="secondary"
+        ):
             with st.spinner("Se conectează la Gomag..."):
                 importer = GomagImporter()
                 if importer.login():
@@ -610,7 +784,9 @@ elif st.session_state.step == 2:
             f"{c['name']} (ID: {c['id']})"
             for c in st.session_state.categories
         ]
-        selected = st.selectbox("Categorie existentă:", cat_options)
+        selected = st.selectbox(
+            "Categorie existentă:", cat_options
+        )
 
         if selected != "-- Selectează --":
             idx = cat_options.index(selected) - 1
@@ -636,11 +812,18 @@ elif st.session_state.step == 2:
     # Creăm DataFrame pentru afișare
     display_data = []
     for p in products:
+        colors_str = ', '.join(p.get('colors', [])[:3])
+        if len(p.get('colors', [])) > 3:
+            colors_str += f" +{len(p['colors']) - 3}"
+
         display_data.append({
             'Import': True,
-            'Nume': p.get('name', 'N/A'),
+            'Nume': p.get('name', 'N/A')[:60],
             'SKU': p.get('sku', 'N/A'),
-            'Preț (LEI)': round(float(p.get('final_price', 1.0)), 2),
+            'Preț (LEI)': round(
+                float(p.get('final_price', 1.0)), 2
+            ),
+            'Culori': colors_str or 'N/A',
             'Imagini': len(p.get('images', [])),
             'Sursă': p.get('source_site', 'N/A'),
         })
@@ -668,6 +851,10 @@ elif st.session_state.step == 2:
                 "Imagini",
                 help="Numărul de imagini",
             ),
+            "Culori": st.column_config.TextColumn(
+                "Culori",
+                help="Variante de culoare",
+            ),
         },
         hide_index=True,
     )
@@ -677,7 +864,9 @@ elif st.session_state.step == 2:
     # ---- BUTON IMPORT ----
     st.subheader("🚀 Import în Gomag")
 
-    selected_category = st.session_state.get('selected_category', {})
+    selected_category = st.session_state.get(
+        'selected_category', {}
+    )
     if isinstance(selected_category, dict):
         cat_name = selected_category.get('name', 'Neconfigurat')
     else:
@@ -693,29 +882,42 @@ elif st.session_state.step == 2:
                 if i < len(products):
                     # Actualizăm prețul dacă a fost modificat
                     try:
-                        new_price = float(row.get('Preț (LEI)', 1.0))
+                        new_price = float(
+                            row.get('Preț (LEI)', 1.0)
+                        )
                         products[i]['final_price'] = new_price
                     except (ValueError, TypeError):
                         pass
                     products_to_import.append(products[i])
 
     st.write(
-        f"**{len(products_to_import)} produse selectate pentru import**"
+        f"**{len(products_to_import)} produse selectate "
+        f"pentru import**"
     )
 
     # Opțiuni suplimentare
-    col_opt1, col_opt2 = st.columns(2)
+    col_opt1, col_opt2, col_opt3 = st.columns(3)
     with col_opt1:
         delay_between = st.slider(
             "Delay între importuri (secunde):",
             min_value=2,
             max_value=15,
             value=5,
-            help="Timp de așteptare între importul fiecărui produs",
+            help="Timp de așteptare între importul produselor",
         )
     with col_opt2:
+        import_variants = st.checkbox(
+            "🎨 Importă variante ca produse separate",
+            value=False,
+            help=(
+                "Dacă e bifat, fiecare culoare devine un produs "
+                "separat. Altfel, culorile sunt menționate în "
+                "descriere."
+            ),
+        )
+    with col_opt3:
         show_screenshots = st.checkbox(
-            "Afișează screenshots la erori",
+            "📸 Afișează screenshots la erori",
             value=True,
             help="Afișează capturi de ecran când apar erori",
         )
@@ -730,6 +932,53 @@ elif st.session_state.step == 2:
     )
 
     if import_btn and products_to_import:
+        # Pregătim lista finală (cu sau fără variante separate)
+        final_products = []
+        if import_variants:
+            for product in products_to_import:
+                color_variants = product.get('color_variants', [])
+                if color_variants and len(color_variants) > 1:
+                    for variant in color_variants:
+                        variant_product = product.copy()
+                        v_name = variant.get('name', '')
+                        variant_product['name'] = (
+                            f"{product['name']} - {v_name}"
+                        )
+                        variant_product['sku'] = (
+                            f"{product['sku']}-"
+                            f"{v_name.upper()[:5]}"
+                            if product.get('sku')
+                            else ''
+                        )
+                        variant_product['colors'] = [v_name]
+
+                        # Imaginea variantei
+                        if variant.get('image'):
+                            v_img = make_absolute_url(
+                                variant['image'],
+                                product.get('source_url', '')
+                            )
+                            variant_product['images'] = (
+                                [v_img]
+                                + [
+                                    img for img in product.get(
+                                        'images', []
+                                    )
+                                    if img != v_img
+                                ]
+                            )
+
+                        final_products.append(variant_product)
+                else:
+                    final_products.append(product)
+        else:
+            final_products = products_to_import
+
+        st.info(
+            f"📦 Total produse de importat "
+            f"(inclusiv variante): {len(final_products)}"
+        )
+
         progress_bar = st.progress(0)
         status_text = st.empty()
         results_container = st.container()
@@ -745,11 +994,11 @@ elif st.session_state.step == 2:
                 importer.close()
                 st.stop()
 
-        total = len(products_to_import)
+        total = len(final_products)
         success_count = 0
         fail_count = 0
 
-        for i, product in enumerate(products_to_import):
+        for i, product in enumerate(final_products):
             progress = (i + 1) / total
             progress_bar.progress(progress)
             status_text.text(
@@ -774,7 +1023,12 @@ elif st.session_state.step == 2:
                     'name': product.get('name', 'N/A'),
                     'sku': product.get('sku', 'N/A'),
                     'price': product.get('final_price', 0),
-                    'status': 'success' if success else 'failed',
+                    'colors': ', '.join(
+                        product.get('colors', [])
+                    ),
+                    'status': (
+                        '✅ success' if success else '❌ failed'
+                    ),
                 }
                 st.session_state.import_results.append(result)
 
@@ -797,13 +1051,15 @@ elif st.session_state.step == 2:
                 fail_count += 1
                 with results_container:
                     st.error(
-                        f"❌ [{i + 1}/{total}] Eroare: {str(e)[:100]}"
+                        f"❌ [{i + 1}/{total}] "
+                        f"Eroare: {str(e)[:100]}"
                     )
                 st.session_state.import_results.append({
                     'name': product.get('name', 'N/A'),
                     'sku': product.get('sku', 'N/A'),
                     'price': product.get('final_price', 0),
-                    'status': 'error',
+                    'colors': '',
+                    'status': '❌ error',
                 })
 
             # Delay între importuri
@@ -833,17 +1089,37 @@ elif st.session_state.step == 2:
         st.dataframe(results_df, use_container_width=True)
 
         # Export rezultate
-        results_json = json.dumps(
-            st.session_state.import_results,
-            indent=2,
-            ensure_ascii=False,
-        )
-        st.download_button(
-            label="📥 Descarcă rezultatele importului",
-            data=results_json,
-            file_name="rezultate_import.json",
-            mime="application/json",
-        )
+        col_res1, col_res2 = st.columns(2)
+        with col_res1:
+            results_json = json.dumps(
+                st.session_state.import_results,
+                indent=2,
+                ensure_ascii=False,
+            )
+            st.download_button(
+                label="📥 Descarcă rezultatele (JSON)",
+                data=results_json,
+                file_name="rezultate_import.json",
+                mime="application/json",
+            )
+        with col_res2:
+            results_df_export = pd.DataFrame(
+                st.session_state.import_results
+            )
+            res_buffer = io.BytesIO()
+            results_df_export.to_excel(
+                res_buffer, index=False, engine='openpyxl'
+            )
+            res_buffer.seek(0)
+            st.download_button(
+                label="📥 Descarcă rezultatele (Excel)",
+                data=res_buffer,
+                file_name="rezultate_import.xlsx",
+                mime=(
+                    "application/vnd.openxmlformats-officedocument"
+                    ".spreadsheetml.sheet"
+                ),
+            )
 
     # Buton înapoi
     st.markdown("---")
