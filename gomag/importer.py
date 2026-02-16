@@ -1,12 +1,15 @@
 # gomag/importer.py
 """
-Modul pentru import produse în Gomag.ro via Selenium browser automation.
+Modul pentru import produse în Gomag.ro
+Metoda 1: Generare CSV compatibil cu importul Gomag
+Metoda 2: Upload CSV prin Selenium (browser automation)
 """
 import os
+import io
 import re
 import time
-import json
-import tempfile
+import csv
+import pandas as pd
 import streamlit as st
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -16,12 +19,73 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait, Select
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import (
-    TimeoutException, NoSuchElementException, WebDriverException
+    TimeoutException, NoSuchElementException,
+    StaleElementReferenceException
 )
 
 
 class GomagImporter:
-    """Importă produse în Gomag.ro folosind Selenium."""
+    """Importă produse în Gomag.ro prin CSV sau browser automation."""
+
+    # Coloanele exacte din modelul de import Gomag
+    GOMAG_COLUMNS = [
+        'Cod Produs (SKU)',
+        'Cod EAN',
+        'Cod Grupa',
+        'Varianta principala',
+        'Denumire Produs',
+        'Descriere Produs',
+        'Descriere Scurta a Produsului',
+        'URL Poza de Produs',
+        'URL Video',
+        'Pozitie in Listari',
+        'Produse Cross-Sell',
+        'Produse Up-Sell',
+        'Descriere pt feed-uri',
+        'Atribute: Culoare (variante de produs)',
+        'Cuvinte Cautare',
+        'Pret Produs: Descriere',
+        'GEO',
+        'Produs: Cantitate Totala',
+        'Produs: Unitatea de Masura pentru Cantitatea Totala',
+        'Produs: Cantitate Unitara',
+        'Produs: Unitate de Masura pentru Cantitatea Unitara',
+        'Pret Special',
+        'Produs: Durata de Livrare',
+        'Produs: Tip Durata de Livrare',
+        'Produs: Cantitate Maxima',
+        'Produs: Unitate de masura',
+        'Produs: Cod extern',
+        'Pret de Achizitie',
+        'Produs: Tag postari',
+        'Produs: Produs digital',
+        'Produs: Data ultimei modificari de pret',
+        'Produs: Cota TVA diferita pentru persoanele juridice',
+        'Pretul Include TVA',
+        'Produs: Cota TVA persoane juridice',
+        'Produs: Informatii siguranta produs',
+        'Cota TVA',
+        'Moneda',
+        'Stoc Cantitativ',
+        'Completare Stoc Cantitativ',
+        'Stare Stoc',
+        'Gestioneaza Automat Stocul',
+        'Se Aduce la Comanda',
+        'Cantitate Minima',
+        'Increment de Cantitate',
+        'Greutate (Kg)',
+        'Activ in Magazin',
+        'Activ in Magazin de la data de',
+        'Activ in Magazin pana la data de',
+        'Categorie / Categorii',
+        'Marca (Brand)',
+        'Titlu Meta',
+        'Descriere Meta',
+        'Cuvinte Cheie',
+        'Titlul Imaginii Principale',
+        'Url Link Canonical',
+        'Id Produs',
+    ]
 
     def __init__(self):
         self.driver = None
@@ -35,7 +99,8 @@ class GomagImporter:
             gomag_secrets = st.secrets.get("GOMAG", {})
             return {
                 'base_url': gomag_secrets.get(
-                    "BASE_URL", "https://rucsacantifurtro.gomag.ro"
+                    "BASE_URL",
+                    "https://rucsacantifurtro.gomag.ro"
                 ),
                 'dashboard_path': gomag_secrets.get(
                     "DASHBOARD_PATH", "/gomag/dashboard"
@@ -64,7 +129,6 @@ class GomagImporter:
             'AppleWebKit/537.36 (KHTML, like Gecko) '
             'Chrome/120.0.0.0 Safari/537.36'
         )
-        options.add_argument('--disable-blink-features=AutomationControlled')
 
         if os.path.exists('/usr/bin/chromium'):
             options.binary_location = '/usr/bin/chromium'
@@ -77,10 +141,8 @@ class GomagImporter:
         """Inițializează WebDriver."""
         if self.driver:
             return
-
         try:
             options = self._get_chrome_options()
-
             driver_path = None
             for path in [
                 '/usr/bin/chromedriver',
@@ -93,13 +155,14 @@ class GomagImporter:
 
             if driver_path:
                 service = Service(executable_path=driver_path)
-                self.driver = webdriver.Chrome(service=service, options=options)
+                self.driver = webdriver.Chrome(
+                    service=service, options=options
+                )
             else:
                 self.driver = webdriver.Chrome(options=options)
 
             self.driver.set_page_load_timeout(60)
             self.driver.implicitly_wait(10)
-
         except Exception as e:
             st.error(f"❌ Nu pot inițializa browser: {str(e)}")
             self.driver = None
@@ -112,7 +175,8 @@ class GomagImporter:
         config = self._get_config()
         if not config['username'] or not config['password']:
             st.error(
-                "❌ Credențiale Gomag lipsă! Configurează GOMAG în Secrets."
+                "❌ Credențiale Gomag lipsă! "
+                "Configurează GOMAG în Secrets."
             )
             return False
 
@@ -124,121 +188,74 @@ class GomagImporter:
             self.base_url = config['base_url'].rstrip('/')
             login_url = f"{self.base_url}/gomag/login"
 
-            st.info(f"🔐 Mă conectez la {login_url}...")
+            st.info(f"🔐 Mă conectez la Gomag...")
             self.driver.get(login_url)
-            time.sleep(3)
+            time.sleep(4)
 
-            # Căutăm câmpul de email/username
-            username_field = None
+            # Email
+            email_field = None
             for selector in [
                 "input[name='email']",
                 "input[name='username']",
                 "input[type='email']",
-                "input[name='user']",
-                "input[id*='email']",
-                "input[id*='user']",
                 "input[type='text']",
             ]:
                 try:
-                    username_field = self.driver.find_element(
+                    field = self.driver.find_element(
                         By.CSS_SELECTOR, selector
                     )
-                    if username_field.is_displayed():
+                    if field.is_displayed():
+                        email_field = field
                         break
-                    username_field = None
                 except NoSuchElementException:
                     continue
 
-            if not username_field:
-                # Încercăm cu XPath
-                try:
-                    username_field = self.driver.find_element(
-                        By.XPATH,
-                        "//input[@type='text' or @type='email'][1]"
-                    )
-                except Exception:
-                    st.error("❌ Nu găsesc câmpul de email/username")
-                    self._save_screenshot("login_error")
-                    return False
+            if not email_field:
+                st.error("❌ Nu găsesc câmpul de email Gomag")
+                return False
 
-            username_field.clear()
-            username_field.send_keys(config['username'])
+            email_field.clear()
+            email_field.send_keys(config['username'])
             time.sleep(0.5)
 
-            # Câmpul de parolă
-            password_field = None
+            # Parolă
             try:
-                password_field = self.driver.find_element(
+                pass_field = self.driver.find_element(
                     By.CSS_SELECTOR, "input[type='password']"
                 )
             except NoSuchElementException:
-                st.error("❌ Nu găsesc câmpul de parolă")
+                st.error("❌ Nu găsesc câmpul de parolă Gomag")
                 return False
 
-            password_field.clear()
-            password_field.send_keys(config['password'])
+            pass_field.clear()
+            pass_field.send_keys(config['password'])
             time.sleep(0.5)
 
-            # Butonul de submit
-            submit_btn = None
-            for selector in [
-                "button[type='submit']",
-                "input[type='submit']",
-                "button.login-btn",
-                "button.btn-login",
-                "button[class*='login']",
-                "button.btn-primary",
-                ".login-form button",
-                "form button",
-            ]:
-                try:
-                    submit_btn = self.driver.find_element(
-                        By.CSS_SELECTOR, selector
-                    )
-                    if submit_btn.is_displayed():
-                        break
-                    submit_btn = None
-                except NoSuchElementException:
-                    continue
-
-            if not submit_btn:
-                # Încercăm Enter
-                password_field.send_keys(Keys.RETURN)
-            else:
-                submit_btn.click()
+            # Submit
+            try:
+                btn = self.driver.find_element(
+                    By.CSS_SELECTOR,
+                    "button[type='submit'], input[type='submit']"
+                )
+                self.driver.execute_script(
+                    "arguments[0].click();", btn
+                )
+            except NoSuchElementException:
+                pass_field.send_keys(Keys.RETURN)
 
             time.sleep(5)
 
-            # Verificăm dacă suntem logați
             current_url = self.driver.current_url
-            if 'dashboard' in current_url or 'admin' in current_url:
-                self.logged_in = True
-                st.success("✅ Conectat la Gomag!")
-                return True
-
-            # Verificăm dacă există mesaj de eroare
-            page_source = self.driver.page_source.lower()
-            if any(
-                err in page_source
-                for err in ['invalid', 'error', 'incorrect', 'greșit',
-                            'incorect']
+            if (
+                'dashboard' in current_url
+                or 'admin' in current_url
+                or 'login' not in current_url
             ):
-                st.error("❌ Credențiale incorecte!")
-                return False
-
-            # Poate suntem logați dar pe altă pagină
-            self.driver.get(
-                f"{self.base_url}{config['dashboard_path']}"
-            )
-            time.sleep(3)
-
-            if 'login' not in self.driver.current_url.lower():
                 self.logged_in = True
                 st.success("✅ Conectat la Gomag!")
                 return True
 
-            st.error("❌ Login eșuat - verifică credențialele")
-            self._save_screenshot("login_failed")
+            st.error("❌ Login Gomag eșuat")
             return False
 
         except Exception as e:
@@ -246,10 +263,7 @@ class GomagImporter:
             return False
 
     def get_categories(self) -> list:
-        """
-        Obține lista de categorii din Gomag.
-        Returnează lista de dict-uri {id, name, path}.
-        """
+        """Obține categoriile din Gomag."""
         if self.categories_cache:
             return self.categories_cache
 
@@ -258,37 +272,29 @@ class GomagImporter:
                 return []
 
         try:
-            # Navigăm la pagina de categorii
-            categories_url = f"{self.base_url}/gomag/categories"
-            self.driver.get(categories_url)
-            time.sleep(3)
+            self.driver.get(f"{self.base_url}/gomag/categories")
+            time.sleep(4)
 
             categories = []
 
-            # Încercăm mai multe metode de a găsi categoriile
-            # Metoda 1: Tabel cu categorii
+            # Tabel
             try:
                 rows = self.driver.find_elements(
-                    By.CSS_SELECTOR,
-                    "table tbody tr, .category-item, "
-                    ".category-row, [class*='category'] li"
+                    By.CSS_SELECTOR, "table tbody tr"
                 )
                 for row in rows:
                     try:
                         name_el = row.find_element(
-                            By.CSS_SELECTOR,
-                            "td:first-child a, .category-name, "
-                            "a[class*='category']"
+                            By.CSS_SELECTOR, "td a, td:first-child"
                         )
                         cat_name = name_el.text.strip()
-                        cat_href = name_el.get_attribute('href') or ''
+                        cat_href = (
+                            name_el.get_attribute('href') or ''
+                        )
                         cat_id = ""
-
-                        # Extragem ID din href
                         id_match = re.search(r'/(\d+)', cat_href)
                         if id_match:
                             cat_id = id_match.group(1)
-
                         if cat_name:
                             categories.append({
                                 'id': cat_id,
@@ -300,20 +306,16 @@ class GomagImporter:
             except Exception:
                 pass
 
-            # Metoda 2: Select dropdown din pagina de adăugare produs
+            # Select din pagina add product
             if not categories:
                 try:
-                    add_url = f"{self.base_url}/gomag/products/add"
-                    self.driver.get(add_url)
+                    self.driver.get(
+                        f"{self.base_url}/gomag/products/add"
+                    )
                     time.sleep(3)
-
-                    # Căutăm select pentru categorie
                     for selector in [
                         "select[name*='category']",
                         "select[id*='category']",
-                        "select[name*='categ']",
-                        "#category_id",
-                        "#product_category",
                     ]:
                         try:
                             select_el = self.driver.find_element(
@@ -325,7 +327,10 @@ class GomagImporter:
                             for opt in options:
                                 val = opt.get_attribute('value')
                                 text = opt.text.strip()
-                                if val and text and val != '0' and val != '':
+                                if (
+                                    val and text
+                                    and val != '0' and val != ''
+                                ):
                                     categories.append({
                                         'id': val,
                                         'name': text.strip('- '),
@@ -338,453 +343,416 @@ class GomagImporter:
                 except Exception:
                     pass
 
-            # Metoda 3: Checkboxes sau tree
-            if not categories:
-                try:
-                    checkboxes = self.driver.find_elements(
-                        By.CSS_SELECTOR,
-                        "input[name*='category'], "
-                        "[class*='category-tree'] input"
-                    )
-                    for cb in checkboxes:
-                        try:
-                            label = self.driver.find_element(
-                                By.CSS_SELECTOR,
-                                f"label[for='{cb.get_attribute('id')}']"
-                            )
-                            cat_name = label.text.strip()
-                            cat_val = cb.get_attribute('value')
-                            if cat_name and cat_val:
-                                categories.append({
-                                    'id': cat_val,
-                                    'name': cat_name,
-                                    'path': cat_name,
-                                })
-                        except Exception:
-                            continue
-                except Exception:
-                    pass
-
             self.categories_cache = categories
-
-            if not categories:
-                st.warning(
-                    "⚠️ Nu am putut extrage categoriile automat. "
-                    "Poți introduce manual."
-                )
-
             return categories
 
         except Exception as e:
             st.error(f"❌ Eroare obținere categorii: {str(e)}")
             return []
 
-    def import_product(self, product: dict, category_id: str = "",
-                       category_name: str = "") -> bool:
+    # ══════════════════════════════════════════════
+    # GENERARE CSV COMPATIBIL GOMAG
+    # ══════════════════════════════════════════════
+
+    def generate_gomag_csv(
+        self,
+        products: list,
+        category_name: str = "",
+        brand: str = "",
+    ) -> pd.DataFrame:
         """
-        Importă un produs în Gomag prin browser automation.
+        Generează un DataFrame cu structura exactă
+        a modelului de import Gomag.
+        """
+        rows = []
+
+        for product in products:
+            row = self._product_to_gomag_row(
+                product, category_name, brand
+            )
+            rows.append(row)
+
+        df = pd.DataFrame(rows, columns=self.GOMAG_COLUMNS)
+        return df
+
+    def _product_to_gomag_row(
+        self,
+        product: dict,
+        category_name: str = "",
+        brand: str = "",
+    ) -> list:
+        """Convertește un produs scraped în rând Gomag CSV."""
+
+        # SKU
+        sku = product.get('sku', '')
+
+        # Nume
+        name = product.get('name', 'Produs Importat')
+
+        # Descriere HTML
+        description = product.get('description', '')
+
+        # Descriere scurtă
+        short_desc = ""
+        if product.get('specifications'):
+            specs_parts = []
+            for k, v in product['specifications'].items():
+                specs_parts.append(f"{k}: {v}")
+            short_desc = " | ".join(specs_parts[:5])
+
+        if not short_desc and description:
+            # Extragem text simplu din HTML
+            import re as re_mod
+            clean = re_mod.sub(r'<[^>]+>', '', description)
+            short_desc = clean[:250].strip()
+
+        # URL Imagini - separate cu |
+        images = product.get('images', [])
+        images_url = '|'.join(images[:10]) if images else ''
+
+        # Culori - separate cu ,
+        colors = product.get('colors', [])
+        colors_str = ','.join(colors) if colors else ''
+
+        # Preț
+        price = product.get('final_price', 1.0)
+        if price <= 0:
+            price = 1.0
+        price_str = f"{price:.2f}"
+
+        # Preț achiziție (original)
+        buy_price = product.get('original_price', 0)
+        buy_price_str = (
+            f"{buy_price:.2f}" if buy_price > 0 else ""
+        )
+
+        # Greutate
+        weight = product.get('weight', '')
+        weight_str = ""
+        if weight:
+            weight_match = re.search(r'([\d.]+)', str(weight))
+            if weight_match:
+                weight_str = weight_match.group(1)
+
+        # Cuvinte cheie
+        keywords = name.lower().replace('-', ' ')
+        if 'anti' in keywords.lower():
+            keywords += ", anti-furt, anti-theft"
+        if 'rucsac' in keywords.lower() or 'backpack' in keywords.lower():
+            keywords += ", rucsac, backpack"
+        keywords += ", protectie, siguranta"
+
+        # Descriere Meta
+        meta_desc = short_desc[:160] if short_desc else name[:160]
+
+        # Brand
+        if not brand:
+            source = product.get('source_site', '')
+            brand_map = {
+                'xdconnects': 'XD Design',
+                'pfconcept': 'PF Concept',
+                'promobox': 'Promobox',
+                'andapresent': 'Anda Present',
+                'midocean': 'Midocean',
+                'sipec': 'Sipec',
+                'stricker': 'Stricker',
+                'stamina': 'Stamina',
+                'utteam': 'UT Team',
+                'clipper': 'Clipper',
+                'psi': 'PSI',
+            }
+            brand = brand_map.get(source, source)
+
+        # Construim rândul cu TOATE coloanele Gomag
+        row = [
+            sku,                            # Cod Produs (SKU)
+            '',                             # Cod EAN
+            '',                             # Cod Grupa
+            '',                             # Varianta principala
+            name,                           # Denumire Produs
+            description,                    # Descriere Produs
+            short_desc,                     # Descriere Scurta
+            images_url,                     # URL Poza de Produs
+            '',                             # URL Video
+            '',                             # Pozitie in Listari
+            '',                             # Produse Cross-Sell
+            '',                             # Produse Up-Sell
+            short_desc[:200],               # Descriere pt feed-uri
+            colors_str,                     # Atribute: Culoare
+            keywords,                       # Cuvinte Cautare
+            price_str,                      # Pret Produs: Descriere
+            '',                             # GEO
+            '',                             # Cantitate Totala
+            '',                             # UM Cantitate Totala
+            '',                             # Cantitate Unitara
+            '',                             # UM Cantitate Unitara
+            '',                             # Pret Special
+            '2-5 zile lucratoare',          # Durata de Livrare
+            'zile',                         # Tip Durata Livrare
+            '',                             # Cantitate Maxima
+            'buc',                          # Unitate de masura
+            product.get('source_url', ''),  # Cod extern
+            buy_price_str,                  # Pret de Achizitie
+            '',                             # Tag postari
+            '0',                            # Produs digital
+            '',                             # Data modif pret
+            '',                             # Cota TVA diferita PJ
+            '1',                            # Pretul Include TVA
+            '',                             # Cota TVA PJ
+            '',                             # Info siguranta
+            '19',                           # Cota TVA
+            'RON',                          # Moneda
+            '1',                            # Stoc Cantitativ
+            '',                             # Completare Stoc
+            'In Stoc',                      # Stare Stoc
+            '0',                            # Gestioneaza Auto Stoc
+            '0',                            # Se Aduce la Comanda
+            '1',                            # Cantitate Minima
+            '1',                            # Increment Cantitate
+            weight_str,                     # Greutate (Kg)
+            '1',                            # Activ in Magazin
+            '',                             # Activ de la
+            '',                             # Activ pana la
+            category_name,                  # Categorie
+            brand,                          # Marca (Brand)
+            name[:70],                      # Titlu Meta
+            meta_desc,                      # Descriere Meta
+            keywords[:250],                 # Cuvinte Cheie
+            name[:100],                     # Titlul Imaginii
+            '',                             # Url Link Canonical
+            '',                             # Id Produs
+        ]
+
+        return row
+
+    def generate_csv_file(
+        self,
+        products: list,
+        category_name: str = "",
+        brand: str = "",
+    ) -> bytes:
+        """
+        Generează CSV-ul ca bytes pentru download.
+        Encoding: UTF-8 cu BOM (Excel compatibility).
+        """
+        df = self.generate_gomag_csv(
+            products, category_name, brand
+        )
+
+        # CSV cu separator ; (Gomag standard)
+        output = io.StringIO()
+        df.to_csv(
+            output,
+            index=False,
+            sep=',',
+            quoting=csv.QUOTE_ALL,
+            encoding='utf-8',
+        )
+
+        csv_content = output.getvalue()
+        # Adăugăm BOM pentru Excel
+        return ('\ufeff' + csv_content).encode('utf-8')
+
+    def generate_excel_file(
+        self,
+        products: list,
+        category_name: str = "",
+        brand: str = "",
+    ) -> bytes:
+        """Generează Excel-ul pentru import Gomag."""
+        df = self.generate_gomag_csv(
+            products, category_name, brand
+        )
+
+        excel_buffer = io.BytesIO()
+        df.to_excel(
+            excel_buffer,
+            index=False,
+            engine='openpyxl',
+        )
+        excel_buffer.seek(0)
+        return excel_buffer.getvalue()
+
+    # ══════════════════════════════════════════════
+    # UPLOAD CSV ÎN GOMAG (Browser Automation)
+    # ══════════════════════════════════════════════
+
+    def upload_csv_to_gomag(self, csv_bytes: bytes) -> bool:
+        """
+        Uploadează CSV-ul în Gomag prin browser automation.
+        Navighează la Import Produse → Upload fișier.
         """
         if not self.logged_in:
             if not self.login():
                 return False
 
         try:
-            # Navigăm la pagina de adăugare produs
-            add_url = f"{self.base_url}/gomag/products/add"
-            self.driver.get(add_url)
-            time.sleep(3)
+            # Navigăm la pagina de import
+            import_urls = [
+                f"{self.base_url}/gomag/products/import",
+                f"{self.base_url}/gomag/import",
+                f"{self.base_url}/gomag/products/csv-import",
+            ]
 
-            # --- NUME PRODUS ---
-            self._fill_field(
-                [
-                    "input[name='name']",
-                    "input[name='title']",
-                    "input[name='product_name']",
-                    "input[id*='name']",
-                    "input[id*='title']",
-                ],
-                product.get('name', 'Produs Importat')
-            )
-            time.sleep(0.5)
-
-            # --- SKU ---
-            self._fill_field(
-                [
-                    "input[name='sku']",
-                    "input[name='code']",
-                    "input[name='product_code']",
-                    "input[id*='sku']",
-                    "input[id*='code']",
-                ],
-                product.get('sku', '')
-            )
-            time.sleep(0.3)
-
-            # --- PREȚ ---
-            price_str = str(product.get('final_price', 1.0))
-            self._fill_field(
-                [
-                    "input[name='price']",
-                    "input[name='regular_price']",
-                    "input[id*='price']",
-                ],
-                price_str
-            )
-            time.sleep(0.3)
-
-            # --- STOC ---
-            self._fill_field(
-                [
-                    "input[name='stock']",
-                    "input[name='quantity']",
-                    "input[id*='stock']",
-                    "input[id*='quantity']",
-                ],
-                "1"
-            )
-            time.sleep(0.3)
-
-            # --- CATEGORIE ---
-            if category_id:
-                self._select_category(category_id, category_name)
-
-            # --- DESCRIERE ---
-            description = product.get('description', '')
-            if description:
-                self._fill_description(description)
-
-            # --- IMAGINI ---
-            images = product.get('images', [])
-            if images:
-                self._upload_images(images)
-
-            # --- STATUS VIZIBIL ---
-            self._set_product_visible()
-
-            # --- SALVARE ---
-            time.sleep(1)
-            saved = self._save_product()
-
-            if saved:
-                st.success(
-                    f"✅ Produs importat: {product.get('name', 'N/A')}"
-                )
-            else:
-                st.warning(
-                    f"⚠️ Posibil salvat cu probleme: "
-                    f"{product.get('name', 'N/A')}"
-                )
-
-            return saved
-
-        except Exception as e:
-            st.error(
-                f"❌ Eroare import produs "
-                f"{product.get('name', 'N/A')}: {str(e)}"
-            )
-            self._save_screenshot("import_error")
-            return False
-
-    def _fill_field(self, selectors: list, value: str):
-        """Completează un câmp găsit prin mai mulți selectori."""
-        for selector in selectors:
-            try:
-                field = self.driver.find_element(By.CSS_SELECTOR, selector)
-                if field.is_displayed():
-                    field.clear()
-                    field.send_keys(value)
-                    return True
-            except NoSuchElementException:
-                continue
-        return False
-
-    def _select_category(self, category_id: str, category_name: str = ""):
-        """Selectează categoria produsului."""
-        # Metoda 1: Select dropdown
-        for selector in [
-            "select[name*='category']",
-            "select[id*='category']",
-            "#category_id",
-        ]:
-            try:
-                select_el = self.driver.find_element(
-                    By.CSS_SELECTOR, selector
-                )
-                select = Select(select_el)
-                try:
-                    select.select_by_value(category_id)
-                    return
-                except Exception:
-                    if category_name:
-                        try:
-                            select.select_by_visible_text(category_name)
-                            return
-                        except Exception:
-                            pass
-            except NoSuchElementException:
-                continue
-
-        # Metoda 2: Checkbox
-        try:
-            checkbox = self.driver.find_element(
-                By.CSS_SELECTOR,
-                f"input[value='{category_id}'][name*='category']"
-            )
-            if not checkbox.is_selected():
-                checkbox.click()
-            return
-        except NoSuchElementException:
-            pass
-
-        # Metoda 3: Click pe text
-        if category_name:
-            try:
-                labels = self.driver.find_elements(
-                    By.XPATH,
-                    f"//label[contains(text(), '{category_name}')]"
-                )
-                for label in labels:
-                    try:
-                        label.click()
-                        return
-                    except Exception:
-                        continue
-            except Exception:
-                pass
-
-    def _fill_description(self, description: str):
-        """Completează descrierea produsului (cu suport TinyMCE/CKEditor)."""
-        # Metoda 1: Textarea simplă
-        for selector in [
-            "textarea[name='description']",
-            "textarea[name='body']",
-            "textarea[id*='description']",
-            "textarea[id*='content']",
-        ]:
-            try:
-                textarea = self.driver.find_element(
-                    By.CSS_SELECTOR, selector
-                )
-                if textarea.is_displayed():
-                    textarea.clear()
-                    textarea.send_keys(description)
-                    return
-            except NoSuchElementException:
-                continue
-
-        # Metoda 2: TinyMCE
-        try:
-            iframes = self.driver.find_elements(
-                By.CSS_SELECTOR, "iframe[id*='mce'], iframe[id*='editor']"
-            )
-            for iframe in iframes:
-                try:
-                    self.driver.switch_to.frame(iframe)
-                    body = self.driver.find_element(
-                        By.CSS_SELECTOR, "body"
+            import_page_found = False
+            for import_url in import_urls:
+                self.driver.get(import_url)
+                time.sleep(3)
+                # Verificăm dacă pagina există
+                if 'import' in self.driver.current_url.lower():
+                    import_page_found = True
+                    st.info(
+                        f"📄 Gomag: Pagina import: "
+                        f"{self.driver.current_url[:60]}"
                     )
-                    body.clear()
-                    self.driver.execute_script(
-                        "arguments[0].innerHTML = arguments[1];",
-                        body, description
-                    )
-                    self.driver.switch_to.default_content()
-                    return
-                except Exception:
-                    self.driver.switch_to.default_content()
-                    continue
-        except Exception:
-            pass
-
-        # Metoda 3: CKEditor
-        try:
-            self.driver.execute_script("""
-                if (typeof CKEDITOR !== 'undefined') {
-                    for (var name in CKEDITOR.instances) {
-                        CKEDITOR.instances[name].setData(arguments[0]);
-                        return;
-                    }
-                }
-            """, description)
-        except Exception:
-            pass
-
-        # Metoda 4: ContentEditable
-        try:
-            editable = self.driver.find_element(
-                By.CSS_SELECTOR,
-                "[contenteditable='true']"
-            )
-            self.driver.execute_script(
-                "arguments[0].innerHTML = arguments[1];",
-                editable, description
-            )
-        except Exception:
-            pass
-
-    def _upload_images(self, image_urls: list):
-        """Upload imagini sau setează URL-uri de imagini."""
-        # Metoda 1: Câmp de URL imagine
-        for i, img_url in enumerate(image_urls[:5]):  # max 5 imagini
-            for selector in [
-                f"input[name='image_url[{i}]']",
-                f"input[name='images[{i}]']",
-                "input[name='image_url']",
-                "input[name='image']",
-                "input[id*='image_url']",
-            ]:
+                    break
+                # Verificăm dacă avem input file
                 try:
-                    field = self.driver.find_element(
-                        By.CSS_SELECTOR, selector
+                    self.driver.find_element(
+                        By.CSS_SELECTOR, "input[type='file']"
                     )
-                    if field.is_displayed():
-                        field.clear()
-                        field.send_keys(img_url)
-                        break
+                    import_page_found = True
+                    break
                 except NoSuchElementException:
                     continue
 
-        # Metoda 2: Buton de adăugare imagine prin URL
-        try:
-            for img_url in image_urls[:5]:
-                add_btns = self.driver.find_elements(
-                    By.CSS_SELECTOR,
-                    "button[class*='add-image'], "
-                    "a[class*='add-image'], "
-                    "[data-action='add-image']"
+            if not import_page_found:
+                st.error(
+                    "❌ Nu găsesc pagina de import produse "
+                    "în Gomag"
                 )
-                for btn in add_btns:
-                    try:
-                        btn.click()
-                        time.sleep(1)
-
-                        url_input = self.driver.find_element(
-                            By.CSS_SELECTOR,
-                            ".modal input[type='url'], "
-                            ".modal input[type='text'], "
-                            ".popup input[type='url']"
-                        )
-                        url_input.clear()
-                        url_input.send_keys(img_url)
-
-                        confirm_btn = self.driver.find_element(
-                            By.CSS_SELECTOR,
-                            ".modal button[type='submit'], "
-                            ".modal .btn-primary, "
-                            ".popup button.confirm"
-                        )
-                        confirm_btn.click()
-                        time.sleep(1)
-                        break
-                    except Exception:
-                        continue
-        except Exception:
-            pass
-
-    def _set_product_visible(self):
-        """Setează produsul ca vizibil."""
-        # Metoda 1: Checkbox activ
-        for selector in [
-            "input[name='active']",
-            "input[name='status']",
-            "input[name='visible']",
-            "input[name='is_active']",
-            "input[id*='active']",
-            "input[id*='status']",
-        ]:
-            try:
-                checkbox = self.driver.find_element(
-                    By.CSS_SELECTOR, selector
-                )
-                if checkbox.get_attribute('type') == 'checkbox':
-                    if not checkbox.is_selected():
-                        checkbox.click()
-                    return
-            except NoSuchElementException:
-                continue
-
-        # Metoda 2: Select status
-        for selector in [
-            "select[name='status']",
-            "select[name='active']",
-            "select[id*='status']",
-        ]:
-            try:
-                select_el = self.driver.find_element(
-                    By.CSS_SELECTOR, selector
-                )
-                select = Select(select_el)
+                # Screenshot debug
                 try:
-                    select.select_by_value('1')
-                except Exception:
-                    try:
-                        select.select_by_visible_text('Activ')
-                    except Exception:
-                        try:
-                            select.select_by_visible_text('Active')
-                        except Exception:
-                            select.select_by_index(1)
-                return
-            except NoSuchElementException:
-                continue
-
-    def _save_product(self) -> bool:
-        """Apasă butonul de salvare."""
-        for selector in [
-            "button[type='submit']",
-            "input[type='submit']",
-            "button.btn-save",
-            "button[class*='save']",
-            "button.btn-primary",
-            "#save-product",
-            "button[name='save']",
-            ".form-actions button[type='submit']",
-        ]:
-            try:
-                btn = self.driver.find_element(By.CSS_SELECTOR, selector)
-                if btn.is_displayed():
-                    # Scroll to button
-                    self.driver.execute_script(
-                        "arguments[0].scrollIntoView(true);", btn
+                    screenshot = self.driver.get_screenshot_as_png()
+                    st.image(
+                        screenshot,
+                        caption="Gomag - căutare import",
+                        width=700
                     )
-                    time.sleep(0.5)
-                    btn.click()
-                    time.sleep(5)
+                except Exception:
+                    pass
+                return False
 
-                    # Verificăm dacă s-a salvat
-                    page_source = self.driver.page_source.lower()
-                    if any(
-                        msg in page_source
-                        for msg in [
-                            'success', 'salvat', 'saved', 'creat',
-                            'created', 'adăugat', 'added'
-                        ]
-                    ):
-                        return True
+            # Salvăm CSV-ul temporar
+            import tempfile
+            tmp_file = tempfile.NamedTemporaryFile(
+                suffix='.csv',
+                delete=False,
+                mode='wb'
+            )
+            tmp_file.write(csv_bytes)
+            tmp_file.close()
+            tmp_path = tmp_file.name
 
-                    # Dacă nu avem eroare, presupunem succes
-                    if not any(
-                        err in page_source
-                        for err in ['error', 'eroare', 'failed', 'eșuat']
-                    ):
-                        return True
+            try:
+                # Găsim input-ul de file
+                file_input = None
+                for selector in [
+                    "input[type='file']",
+                    "input[name='file']",
+                    "input[name='import_file']",
+                    "input[name='csv_file']",
+                    "input[accept*='.csv']",
+                    "input[accept*='.xlsx']",
+                ]:
+                    try:
+                        file_input = self.driver.find_element(
+                            By.CSS_SELECTOR, selector
+                        )
+                        break
+                    except NoSuchElementException:
+                        continue
 
+                if not file_input:
+                    st.error("❌ Nu găsesc câmpul de upload fișier")
                     return False
-            except NoSuchElementException:
-                continue
 
-        st.warning("⚠️ Nu am găsit butonul de salvare")
-        return False
+                # Upload fișier
+                file_input.send_keys(tmp_path)
+                time.sleep(2)
 
-    def _save_screenshot(self, name: str):
-        """Salvează screenshot pentru debugging."""
-        if not self.driver:
-            return
+                st.info("📤 Fișier CSV atașat, caut butonul de import...")
+
+                # Click pe butonul de import/upload
+                submit_selectors = [
+                    "button[type='submit']",
+                    "input[type='submit']",
+                    "button[class*='import']",
+                    "button[class*='upload']",
+                    "button.btn-primary",
+                    "button[class*='submit']",
+                ]
+
+                for selector in submit_selectors:
+                    try:
+                        btn = self.driver.find_element(
+                            By.CSS_SELECTOR, selector
+                        )
+                        if btn.is_displayed():
+                            self.driver.execute_script(
+                                "arguments[0].click();", btn
+                            )
+                            time.sleep(10)
+                            st.info(
+                                "✅ CSV uploadat, aștept procesarea..."
+                            )
+                            break
+                    except NoSuchElementException:
+                        continue
+
+                # Verificăm rezultatul
+                time.sleep(5)
+                page_source = self.driver.page_source.lower()
+                if any(
+                    msg in page_source
+                    for msg in [
+                        'success', 'importat', 'imported',
+                        'finalizat', 'complete', 'produse adaugate',
+                    ]
+                ):
+                    st.success("✅ Import CSV reușit!")
+                    return True
+                elif any(
+                    msg in page_source
+                    for msg in ['error', 'eroare', 'failed', 'eșuat']
+                ):
+                    st.error("❌ Import CSV eșuat!")
+                    return False
+                else:
+                    st.warning(
+                        "⚠️ Status import neclar, verifică manual"
+                    )
+                    return True
+
+            finally:
+                # Ștergem fișierul temporar
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+
+        except Exception as e:
+            st.error(f"❌ Eroare upload CSV: {str(e)}")
+            return False
+
+    def import_product(
+        self,
+        product: dict,
+        category_id: str = "",
+        category_name: str = "",
+    ) -> bool:
+        """
+        Import un singur produs - generează CSV
+        și îl uploadează.
+        """
         try:
-            screenshot = self.driver.get_screenshot_as_png()
-            st.image(screenshot, caption=f"Screenshot: {name}", width=600)
-        except Exception:
-            pass
+            csv_bytes = self.generate_csv_file(
+                [product], category_name
+            )
+            return self.upload_csv_to_gomag(csv_bytes)
+        except Exception as e:
+            st.error(f"❌ Eroare import produs: {str(e)}")
+            return False
 
     def close(self):
         """Închide browserul."""
