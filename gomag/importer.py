@@ -1,1070 +1,1011 @@
-# app.py
+# gomag/importer.py
 """
-Aplicație Streamlit pentru import produse anti-theft în Gomag.ro
-Pasul 1: Extragere date de pe site-uri + traducere
-Pasul 2: Generare CSV/Excel compatibil Gomag + import
+Modul pentru import produse în Gomag.ro
+- Generare CSV/Excel compatibil
+- Upload automat prin Selenium la:
+  /gomag/product/import/add
 """
+import os
 import io
-import json
+import re
 import time
+import csv
+import tempfile
 import pandas as pd
 import streamlit as st
-from utils.helpers import match_scraper, format_product_for_display
-from utils.translator import translate_product_data
-from utils.image_handler import make_absolute_url
-from scrapers import get_scraper
-from gomag.importer import GomagImporter
-
-# ──────────────────────────────────────────────
-# CONFIGURARE PAGINĂ
-# ──────────────────────────────────────────────
-st.set_page_config(
-    page_title="Import Produse Anti-Theft → Gomag",
-    page_icon="🎒",
-    layout="wide",
-    initial_sidebar_state="expanded",
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support.ui import WebDriverWait, Select
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import (
+    TimeoutException, NoSuchElementException,
+    StaleElementReferenceException
 )
 
-st.title("🎒 Import Produse Anti-Theft → Gomag.ro")
-st.markdown("---")
 
-# ──────────────────────────────────────────────
-# INIȚIALIZARE SESSION STATE
-# ──────────────────────────────────────────────
-if 'scraped_products' not in st.session_state:
-    st.session_state.scraped_products = []
-if 'translated_products' not in st.session_state:
-    st.session_state.translated_products = []
-if 'import_results' not in st.session_state:
-    st.session_state.import_results = []
-if 'categories' not in st.session_state:
-    st.session_state.categories = []
-if 'selected_category' not in st.session_state:
-    st.session_state.selected_category = ""
-if 'step' not in st.session_state:
-    st.session_state.step = 1
-if 'urls_to_process' not in st.session_state:
-    st.session_state.urls_to_process = []
+class GomagImporter:
+    """Importă produse în Gomag.ro prin CSV sau browser automation."""
 
-# ──────────────────────────────────────────────
-# SIDEBAR - CONFIGURARE
-# ──────────────────────────────────────────────
-with st.sidebar:
-    st.header("⚙️ Configurare")
+    GOMAG_COLUMNS = [
+        'Cod Produs (SKU)',
+        'Cod EAN',
+        'Cod Grupa',
+        'Varianta principala',
+        'Denumire Produs',
+        'Descriere Produs',
+        'Descriere Scurta a Produsului',
+        'URL Poza de Produs',
+        'URL Video',
+        'Pozitie in Listari',
+        'Produse Cross-Sell',
+        'Produse Up-Sell',
+        'Descriere pt feed-uri',
+        'Atribute: Culoare (variante de produs)',
+        'Cuvinte Cautare',
+        'Pret Produs: Descriere',
+        'GEO',
+        'Produs: Cantitate Totala',
+        'Produs: Unitatea de Masura pentru Cantitatea Totala',
+        'Produs: Cantitate Unitara',
+        'Produs: Unitate de Masura pentru Cantitatea Unitara',
+        'Pret Special',
+        'Produs: Durata de Livrare',
+        'Produs: Tip Durata de Livrare',
+        'Produs: Cantitate Maxima',
+        'Produs: Unitate de masura',
+        'Produs: Cod extern',
+        'Pret de Achizitie',
+        'Produs: Tag postari',
+        'Produs: Produs digital',
+        'Produs: Data ultimei modificari de pret',
+        'Produs: Cota TVA diferita pentru persoanele juridice',
+        'Pretul Include TVA',
+        'Produs: Cota TVA persoane juridice',
+        'Produs: Informatii siguranta produs',
+        'Cota TVA',
+        'Moneda',
+        'Stoc Cantitativ',
+        'Completare Stoc Cantitativ',
+        'Stare Stoc',
+        'Gestioneaza Automat Stocul',
+        'Se Aduce la Comanda',
+        'Cantitate Minima',
+        'Increment de Cantitate',
+        'Greutate (Kg)',
+        'Activ in Magazin',
+        'Activ in Magazin de la data de',
+        'Activ in Magazin pana la data de',
+        'Categorie / Categorii',
+        'Marca (Brand)',
+        'Titlu Meta',
+        'Descriere Meta',
+        'Cuvinte Cheie',
+        'Titlul Imaginii Principale',
+        'Url Link Canonical',
+        'Id Produs',
+    ]
 
-    # Verificare Secrets
-    st.subheader("🔑 Status Credențiale")
+    def __init__(self):
+        self.driver = None
+        self.logged_in = False
+        self.base_url = ""
+        self.categories_cache = []
 
-    gomag_ok = False
-    try:
-        gomag_user = st.secrets.get("GOMAG", {}).get("USERNAME", "")
-        gomag_ok = bool(gomag_user)
-    except Exception:
-        pass
+    def _get_config(self) -> dict:
+        try:
+            gomag_secrets = st.secrets.get("GOMAG", {})
+            return {
+                'base_url': gomag_secrets.get(
+                    "BASE_URL",
+                    "https://rucsacantifurtro.gomag.ro"
+                ),
+                'dashboard_path': gomag_secrets.get(
+                    "DASHBOARD_PATH", "/gomag/dashboard"
+                ),
+                'username': gomag_secrets.get("USERNAME", ""),
+                'password': gomag_secrets.get("PASSWORD", ""),
+            }
+        except Exception:
+            return {
+                'base_url': "https://rucsacantifurtro.gomag.ro",
+                'dashboard_path': "/gomag/dashboard",
+                'username': "",
+                'password': "",
+            }
 
-    if gomag_ok:
-        st.success("✅ Credențiale Gomag configurate")
-    else:
-        st.error("❌ Credențiale Gomag lipsă!")
-        st.code("""
-# În Streamlit Cloud → Settings → Secrets:
-
-[GOMAG]
-BASE_URL = "https://rucsacantifurtro.gomag.ro"
-DASHBOARD_PATH = "/gomag/dashboard"
-USERNAME = "email@exemplu.com"
-PASSWORD = "parola_ta"
-
-[SOURCES]
-PROMOBOX_USER = ""
-PROMOBOX_PASS = ""
-ANDA_USER = ""
-ANDA_PASS = ""
-XD_USER = "user_xd"
-XD_PASS = "pass_xd"
-PSI_USER = "user_psi"
-PSI_PASS = "pass_psi"
-        """, language="toml")
-
-    st.markdown("---")
-
-    # Status
-    st.subheader("📊 Status")
-    st.metric("Produse extrase", len(st.session_state.scraped_products))
-    st.metric(
-        "Produse traduse", len(st.session_state.translated_products)
-    )
-    st.metric("Produse importate", len(st.session_state.import_results))
-
-    st.markdown("---")
-
-    # Navigare pași
-    st.subheader("📋 Pași")
-    step_options = {
-        1: "📥 Pas 1: Upload & Extragere",
-        2: "📝 Pas 2: Verificare & Import Gomag",
-    }
-    selected_step = st.radio(
-        "Selectează pasul:",
-        options=list(step_options.keys()),
-        format_func=lambda x: step_options[x],
-        index=st.session_state.step - 1,
-    )
-    st.session_state.step = selected_step
-
-    st.markdown("---")
-
-    # Buton reset
-    if st.button("🔄 Reset Complet", type="secondary"):
-        for key in [
-            'scraped_products', 'translated_products',
-            'import_results', 'categories', 'urls_to_process'
-        ]:
-            st.session_state[key] = []
-        st.session_state.step = 1
-        st.session_state.selected_category = ""
-        st.rerun()
-
-
-# ══════════════════════════════════════════════
-# PAS 1: UPLOAD EXCEL + EXTRAGERE DATE
-# ══════════════════════════════════════════════
-if st.session_state.step == 1:
-    st.header("📥 Pas 1: Upload Link-uri & Extragere Date")
-
-    # Tab-uri pentru input
-    tab_upload, tab_manual = st.tabs([
-        "📄 Upload Excel/CSV",
-        "✍️ Introducere manuală"
-    ])
-
-    with tab_upload:
-        st.markdown(
-            "Încarcă un fișier Excel (.xlsx) sau CSV cu link-urile "
-            "produselor. Fișierul trebuie să aibă o coloană cu URL-uri."
+    def _get_chrome_options(self) -> Options:
+        options = Options()
+        options.add_argument('--headless=new')
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
+        options.add_argument('--disable-gpu')
+        options.add_argument('--window-size=1920,1080')
+        options.add_argument(
+            '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+            'AppleWebKit/537.36 (KHTML, like Gecko) '
+            'Chrome/120.0.0.0 Safari/537.36'
         )
+        if os.path.exists('/usr/bin/chromium'):
+            options.binary_location = '/usr/bin/chromium'
+        elif os.path.exists('/usr/bin/chromium-browser'):
+            options.binary_location = '/usr/bin/chromium-browser'
+        return options
 
-        uploaded_file = st.file_uploader(
-            "Alege fișierul Excel/CSV",
-            type=['xlsx', 'xls', 'csv'],
-            help="Fișierul trebuie să conțină o coloană cu URL-uri"
-        )
+    def _init_driver(self):
+        if self.driver:
+            return
+        try:
+            options = self._get_chrome_options()
+            driver_path = None
+            for path in [
+                '/usr/bin/chromedriver',
+                '/usr/lib/chromium/chromedriver',
+                '/usr/lib/chromium-browser/chromedriver',
+            ]:
+                if os.path.exists(path):
+                    driver_path = path
+                    break
+            if driver_path:
+                service = Service(executable_path=driver_path)
+                self.driver = webdriver.Chrome(
+                    service=service, options=options
+                )
+            else:
+                self.driver = webdriver.Chrome(options=options)
+            self.driver.set_page_load_timeout(120)
+            self.driver.implicitly_wait(10)
+        except Exception as e:
+            st.error(f"❌ Nu pot inițializa browser: {str(e)}")
+            self.driver = None
 
-        has_header = st.checkbox(
-            "Fișierul are rând de antet (header)",
-            value=False,
-            help=(
-                "Bifează DOAR dacă primul rând conține titluri "
-                "de coloane (ex: 'URL', 'Link'), NU un URL."
-            ),
-        )
+    def _save_screenshot(self, name: str):
+        """Screenshot debug."""
+        if not self.driver:
+            return
+        try:
+            screenshot = self.driver.get_screenshot_as_png()
+            st.image(
+                screenshot,
+                caption=f"🖥️ Gomag: {name}",
+                width=700
+            )
+        except Exception:
+            pass
 
-        if uploaded_file:
+    def login(self) -> bool:
+        if self.logged_in:
+            return True
+        config = self._get_config()
+        if not config['username'] or not config['password']:
+            st.error("❌ Credențiale Gomag lipsă!")
+            return False
+        self._init_driver()
+        if not self.driver:
+            return False
+        try:
+            self.base_url = config['base_url'].rstrip('/')
+            login_url = f"{self.base_url}/gomag/login"
+            st.info("🔐 Mă conectez la Gomag...")
+            self.driver.get(login_url)
+            time.sleep(4)
+
+            # Email
+            email_field = None
+            for sel in [
+                "input[name='email']",
+                "input[name='username']",
+                "input[type='email']",
+                "input[type='text']",
+            ]:
+                try:
+                    f = self.driver.find_element(
+                        By.CSS_SELECTOR, sel
+                    )
+                    if f.is_displayed():
+                        email_field = f
+                        break
+                except NoSuchElementException:
+                    continue
+
+            if not email_field:
+                st.error("❌ Nu găsesc câmpul email Gomag")
+                self._save_screenshot("login_no_email")
+                return False
+
+            email_field.clear()
+            email_field.send_keys(config['username'])
+            time.sleep(0.5)
+
+            # Parolă
             try:
-                header_option = 0 if has_header else None
+                pass_field = self.driver.find_element(
+                    By.CSS_SELECTOR, "input[type='password']"
+                )
+            except NoSuchElementException:
+                st.error("❌ Nu găsesc câmpul parolă Gomag")
+                return False
 
-                if uploaded_file.name.endswith('.csv'):
-                    df = pd.read_csv(
-                        uploaded_file, header=header_option
+            pass_field.clear()
+            pass_field.send_keys(config['password'])
+            time.sleep(0.5)
+
+            # Submit
+            try:
+                btn = self.driver.find_element(
+                    By.CSS_SELECTOR,
+                    "button[type='submit'], input[type='submit']"
+                )
+                self.driver.execute_script(
+                    "arguments[0].click();", btn
+                )
+            except NoSuchElementException:
+                pass_field.send_keys(Keys.RETURN)
+
+            time.sleep(5)
+
+            cur = self.driver.current_url
+            if (
+                'dashboard' in cur
+                or 'admin' in cur
+                or 'login' not in cur
+            ):
+                self.logged_in = True
+                st.success("✅ Conectat la Gomag!")
+                return True
+
+            st.error("❌ Login Gomag eșuat")
+            self._save_screenshot("login_failed")
+            return False
+
+        except Exception as e:
+            st.error(f"❌ Eroare login Gomag: {str(e)}")
+            return False
+
+    def get_categories(self) -> list:
+        if self.categories_cache:
+            return self.categories_cache
+        if not self.logged_in:
+            if not self.login():
+                return []
+        try:
+            self.driver.get(f"{self.base_url}/gomag/categories")
+            time.sleep(4)
+            categories = []
+            try:
+                rows = self.driver.find_elements(
+                    By.CSS_SELECTOR, "table tbody tr"
+                )
+                for row in rows:
+                    try:
+                        el = row.find_element(
+                            By.CSS_SELECTOR, "td a, td:first-child"
+                        )
+                        cat_name = el.text.strip()
+                        cat_href = el.get_attribute('href') or ''
+                        cat_id = ""
+                        m = re.search(r'/(\d+)', cat_href)
+                        if m:
+                            cat_id = m.group(1)
+                        if cat_name:
+                            categories.append({
+                                'id': cat_id,
+                                'name': cat_name,
+                                'path': cat_name,
+                            })
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+            self.categories_cache = categories
+            return categories
+        except Exception as e:
+            st.error(f"❌ Eroare categorii: {str(e)}")
+            return []
+
+    # ══════════════════════════════════════════
+    # CONSTRUCȚIE DESCRIERE PRODUS
+    # ══════════════════════════════════════════
+
+    def _build_full_description(self, product: dict) -> str:
+        """Construiește descriere completă HTML."""
+        parts = []
+
+        raw_desc = product.get('description', '')
+        if raw_desc:
+            clean = re.sub(r'<[^>]+>', ' ', raw_desc)
+            clean = re.sub(r'\s+', ' ', clean).strip()
+            if clean and len(clean) > 10:
+                parts.append(f"<p>{clean}</p>")
+
+        specs = product.get('specifications', {})
+        if specs:
+            parts.append("<h3>Specificații</h3>")
+            parts.append("<ul>")
+            for key, val in specs.items():
+                if key and val:
+                    parts.append(
+                        f"<li><strong>{key}:</strong> {val}</li>"
                     )
-                else:
-                    df = pd.read_excel(
-                        uploaded_file, header=header_option
-                    )
+            parts.append("</ul>")
 
-                # Dacă nu are header, punem nume generic
-                if not has_header:
-                    df.columns = [
-                        f"Coloana_{i+1}"
-                        for i in range(len(df.columns))
-                    ]
+        if product.get('material'):
+            parts.append(
+                f"<p><strong>Material:</strong> "
+                f"{product['material']}</p>"
+            )
+        if product.get('dimensions'):
+            parts.append(
+                f"<p><strong>Dimensiuni:</strong> "
+                f"{product['dimensions']}</p>"
+            )
+        if product.get('weight'):
+            parts.append(
+                f"<p><strong>Greutate:</strong> "
+                f"{product['weight']}</p>"
+            )
 
-                st.success(
-                    f"✅ Fișier încărcat: {len(df)} rânduri, "
-                    f"{len(df.columns)} coloane"
-                )
-                st.dataframe(df.head(10), use_container_width=True)
+        colors = product.get('colors', [])
+        if colors:
+            parts.append(
+                f"<p><strong>Culori disponibile:</strong> "
+                f"{', '.join(colors)}</p>"
+            )
 
-                # Selectăm coloana cu URL-uri
-                url_column = st.selectbox(
-                    "Selectează coloana cu URL-uri:",
-                    options=df.columns.tolist(),
-                    index=0,
-                )
+        if not parts:
+            name = product.get('name', 'Produs importat')
+            parts.append(
+                f"<p>{name}. Produs de calitate superioară, "
+                f"ideal pentru protecția bunurilor personale.</p>"
+            )
 
-                urls = df[url_column].dropna().astype(str).tolist()
-                urls = [
-                    u.strip() for u in urls
-                    if u.strip().startswith('http')
-                ]
+        return "\n".join(parts)
 
-                st.info(f"📎 {len(urls)} URL-uri valide găsite")
+    def _build_short_description(self, product: dict) -> str:
+        """Construiește descriere scurtă (max 250 car)."""
+        parts = []
 
-                if urls:
-                    st.session_state.urls_to_process = urls
+        raw_desc = product.get('description', '')
+        if raw_desc:
+            clean = re.sub(r'<[^>]+>', ' ', raw_desc)
+            clean = re.sub(r'\s+', ' ', clean).strip()
+            if clean and len(clean) > 10:
+                first = clean.split('.')[0]
+                if len(first) > 20:
+                    parts.append(first.strip() + '.')
 
-            except Exception as e:
-                st.error(
-                    f"❌ Eroare la citirea fișierului: {str(e)}"
-                )
+        specs = product.get('specifications', {})
+        if specs and not parts:
+            sp = []
+            for k, v in list(specs.items())[:4]:
+                sp.append(f"{k}: {v}")
+            parts.append(" | ".join(sp))
 
-    with tab_manual:
-        st.markdown("Introdu URL-urile (câte unul pe linie):")
+        if product.get('material') and not parts:
+            parts.append(f"Material: {product['material']}")
 
-        urls_text = st.text_area(
-            "URL-uri produse:",
-            height=300,
-            placeholder=(
-                "https://www.xdconnects.com/en-gb/bags-travel/...\n"
-                "https://www.pfconcept.com/en_cz/...\n"
-                "https://promobox.com/en/products/..."
-            ),
+        colors = product.get('colors', [])
+        if colors:
+            parts.append(
+                f"Disponibil în {len(colors)} culori: "
+                f"{', '.join(colors[:3])}"
+                + ("..." if len(colors) > 3 else "")
+            )
+
+        if not parts:
+            name = product.get('name', 'Produs importat')
+            parts.append(
+                f"{name} - produs cu protecție anti-furt."
+            )
+
+        return " | ".join(parts)[:250]
+
+    def _build_feed_description(self, product: dict) -> str:
+        """Descriere feed-uri (max 200 car)."""
+        name = product.get('name', '')
+        colors = product.get('colors', [])
+        specs = product.get('specifications', {})
+        parts = [name]
+        if colors:
+            parts.append(f"Culori: {', '.join(colors[:3])}")
+        for k, v in list(specs.items())[:2]:
+            parts.append(f"{k}: {v}")
+        return ". ".join(parts)[:200]
+
+    # ══════════════════════════════════════════
+    # GENERARE CSV/EXCEL COMPATIBIL GOMAG
+    # ══════════════════════════════════════════
+
+    def generate_gomag_csv(
+        self, products: list,
+        category_name: str = "", brand: str = "",
+    ) -> pd.DataFrame:
+        rows = []
+        for product in products:
+            row = self._product_to_gomag_row(
+                product, category_name, brand
+            )
+            rows.append(row)
+        return pd.DataFrame(rows, columns=self.GOMAG_COLUMNS)
+
+    def _product_to_gomag_row(
+        self, product: dict,
+        category_name: str = "", brand: str = "",
+    ) -> list:
+        sku = product.get('sku', '')
+        name = product.get('name', 'Produs Importat')
+        description = self._build_full_description(product)
+        short_desc = self._build_short_description(product)
+        feed_desc = self._build_feed_description(product)
+
+        images = product.get('images', [])
+        images_url = '|'.join(images[:10]) if images else ''
+
+        colors = product.get('colors', [])
+        colors_str = ','.join(colors) if colors else ''
+
+        price = product.get('final_price', 1.0)
+        if price <= 0:
+            price = 1.0
+        price_str = f"{price:.2f}"
+
+        buy_price = product.get('original_price', 0)
+        buy_price_str = (
+            f"{buy_price:.2f}" if buy_price > 0 else ""
         )
 
-        if urls_text:
-            urls = [
-                u.strip() for u in urls_text.strip().split('\n')
-                if u.strip().startswith('http')
-            ]
-            st.info(f"📎 {len(urls)} URL-uri introduse")
-            st.session_state.urls_to_process = urls
+        weight = product.get('weight', '')
+        weight_str = ""
+        if weight:
+            wm = re.search(r'([\d.]+)', str(weight))
+            if wm:
+                weight_str = wm.group(1)
 
-    st.markdown("---")
+        kw_parts = [name.lower().replace('-', ' ')]
+        if 'anti' in name.lower():
+            kw_parts.extend(["anti-furt", "anti-theft"])
+        if (
+            'rucsac' in name.lower()
+            or 'backpack' in name.lower()
+        ):
+            kw_parts.extend(["rucsac", "ghiozdan"])
+        kw_parts.extend(["protectie", "siguranta"])
+        if colors:
+            kw_parts.extend(colors[:3])
+        keywords = ", ".join(kw_parts)
 
-    # PROCESARE URL-uri
-    if st.session_state.urls_to_process:
-        urls = st.session_state.urls_to_process
+        meta_desc = (
+            short_desc[:160] if short_desc else name[:160]
+        )
 
-        # Afișăm URL-urile grupate per site
-        st.subheader("📋 URL-uri de procesat")
+        if not brand:
+            source = product.get('source_site', '')
+            brand_map = {
+                'xdconnects': 'XD Design',
+                'pfconcept': 'PF Concept',
+                'promobox': 'Promobox',
+                'andapresent': 'Anda Present',
+                'midocean': 'Midocean',
+                'sipec': 'Sipec',
+                'stricker': 'Stricker',
+                'stamina': 'Stamina',
+                'utteam': 'UT Team',
+                'clipper': 'Clipper',
+                'psi': 'PSI',
+            }
+            brand = brand_map.get(source, source)
 
-        url_summary = {}
-        for url in urls:
-            scraper_name = match_scraper(url)
-            url_summary.setdefault(scraper_name, []).append(url)
+        return [
+            sku,                            # Cod Produs (SKU)
+            '',                             # Cod EAN
+            '',                             # Cod Grupa
+            '',                             # Varianta principala
+            name,                           # Denumire Produs
+            description,                    # Descriere Produs
+            short_desc,                     # Descriere Scurta
+            images_url,                     # URL Poza de Produs
+            '',                             # URL Video
+            '',                             # Pozitie in Listari
+            '',                             # Produse Cross-Sell
+            '',                             # Produse Up-Sell
+            feed_desc,                      # Descriere pt feed-uri
+            colors_str,                     # Atribute: Culoare
+            keywords,                       # Cuvinte Cautare
+            price_str,                      # Pret Produs: Descriere
+            '',                             # GEO
+            '',                             # Cantitate Totala
+            '',                             # UM Cantitate Totala
+            '',                             # Cantitate Unitara
+            '',                             # UM Cantitate Unitara
+            '',                             # Pret Special
+            '2-5 zile lucratoare',          # Durata de Livrare
+            'zile',                         # Tip Durata Livrare
+            '',                             # Cantitate Maxima
+            'buc',                          # Unitate de masura
+            product.get('source_url', ''),  # Cod extern
+            buy_price_str,                  # Pret de Achizitie
+            '',                             # Tag postari
+            '0',                            # Produs digital
+            '',                             # Data modif pret
+            '',                             # Cota TVA diferita PJ
+            '1',                            # Pretul Include TVA
+            '',                             # Cota TVA PJ
+            '',                             # Info siguranta
+            '19',                           # Cota TVA
+            'RON',                          # Moneda
+            '1',                            # Stoc Cantitativ
+            '',                             # Completare Stoc
+            'In Stoc',                      # Stare Stoc
+            '0',                            # Gestioneaza Auto Stoc
+            '0',                            # Se Aduce la Comanda
+            '1',                            # Cantitate Minima
+            '1',                            # Increment Cantitate
+            weight_str,                     # Greutate (Kg)
+            '1',                            # Activ in Magazin
+            '',                             # Activ de la
+            '',                             # Activ pana la
+            category_name,                  # Categorie
+            brand,                          # Marca (Brand)
+            name[:70],                      # Titlu Meta
+            meta_desc,                      # Descriere Meta
+            keywords[:250],                 # Cuvinte Cheie
+            name[:100],                     # Titlul Imaginii
+            '',                             # Url Link Canonical
+            '',                             # Id Produs
+        ]
 
-        for site, site_urls in url_summary.items():
-            with st.expander(
-                f"🌐 {site} ({len(site_urls)} produse)"
-            ):
-                for u in site_urls:
-                    st.text(u)
+    def generate_csv_file(
+        self, products: list,
+        category_name: str = "", brand: str = "",
+    ) -> bytes:
+        df = self.generate_gomag_csv(
+            products, category_name, brand
+        )
+        output = io.StringIO()
+        df.to_csv(
+            output, index=False, sep=',',
+            quoting=csv.QUOTE_ALL, encoding='utf-8',
+        )
+        return ('\ufeff' + output.getvalue()).encode('utf-8')
 
-        st.markdown("---")
+    def generate_excel_file(
+        self, products: list,
+        category_name: str = "", brand: str = "",
+    ) -> bytes:
+        df = self.generate_gomag_csv(
+            products, category_name, brand
+        )
+        buf = io.BytesIO()
+        df.to_excel(buf, index=False, engine='openpyxl')
+        buf.seek(0)
+        return buf.getvalue()
 
-        # BUTON EXTRAGERE
-        col1, col2 = st.columns(2)
+    # ══════════════════════════════════════════
+    # UPLOAD AUTOMAT ÎN GOMAG
+    # URL: /gomag/product/import/add
+    # ══════════════════════════════════════════
 
-        with col1:
-            start_scraping = st.button(
-                "🚀 Începe Extragerea Datelor",
-                type="primary",
-                use_container_width=True,
+    def upload_csv_to_gomag(self, csv_bytes: bytes) -> bool:
+        """
+        Upload automat CSV în Gomag.
+        Pagina: /gomag/product/import/add
+        1. Selectează fișier
+        2. Corelează coloanele automat (prima linie = header)
+        3. Click Start Import
+        """
+        if not self.logged_in:
+            if not self.login():
+                return False
+
+        try:
+            # ═══ PASUL 1: Navigăm la pagina de import ═══
+            import_url = (
+                f"{self.base_url}/gomag/product/import/add"
             )
+            st.info(f"📤 Gomag: Navighez la {import_url}")
+            self.driver.get(import_url)
+            time.sleep(4)
 
-        with col2:
-            translate_option = st.checkbox(
-                "🌍 Traduce automat în română",
-                value=True,
-            )
-
-        if start_scraping:
-            st.session_state.scraped_products = []
-            st.session_state.translated_products = []
-
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            results_container = st.container()
-
-            total = len(urls)
-            active_scrapers = {}
-
-            for i, url in enumerate(urls):
-                progress = (i + 1) / total
-                progress_bar.progress(progress)
-                status_text.text(
-                    f"⏳ Procesez {i + 1}/{total}: {url[:80]}..."
+            # Verificăm că suntem pe pagina corectă
+            cur_url = self.driver.current_url.lower()
+            if 'login' in cur_url:
+                st.error(
+                    "❌ Sesiunea a expirat, reloghez..."
                 )
+                self.logged_in = False
+                if not self.login():
+                    return False
+                self.driver.get(import_url)
+                time.sleep(4)
 
-                scraper_name = match_scraper(url)
+            self._save_screenshot("1_pagina_import")
 
-                # Reutilizăm scraperul pentru același site
-                if scraper_name not in active_scrapers:
-                    active_scrapers[scraper_name] = get_scraper(
-                        scraper_name
+            # ═══ PASUL 2: Salvăm fișierul temporar (.xlsx) ═══
+            # Gomag acceptă XLS, XLSX, TSV
+            # Generăm Excel în loc de CSV
+            tmp = tempfile.NamedTemporaryFile(
+                suffix='.xlsx', delete=False, mode='wb'
+            )
+            tmp.write(csv_bytes)
+            tmp.close()
+            tmp_path = tmp.name
+
+            # Regenerăm ca Excel dacă am primit CSV
+            if csv_bytes[:3] == b'\xef\xbb\xbf':
+                # E CSV cu BOM, convertim la Excel
+                try:
+                    csv_str = csv_bytes.decode('utf-8-sig')
+                    df_tmp = pd.read_csv(
+                        io.StringIO(csv_str), encoding='utf-8'
+                    )
+                    excel_buf = io.BytesIO()
+                    df_tmp.to_excel(
+                        excel_buf, index=False, engine='openpyxl'
+                    )
+                    excel_buf.seek(0)
+
+                    # Rescriem fișierul temporar
+                    with open(tmp_path, 'wb') as f:
+                        f.write(excel_buf.getvalue())
+
+                    st.info("📄 Fișier convertit la Excel (.xlsx)")
+                except Exception as e:
+                    st.warning(
+                        f"⚠️ Nu am putut converti la Excel: "
+                        f"{str(e)[:50]}"
                     )
 
-                scraper = active_scrapers[scraper_name]
-
-                try:
-                    product = scraper.scrape(url)
-
-                    if product:
-                        # Traducere dacă e activată
-                        if translate_option:
-                            status_text.text(
-                                f"🌍 Traduc {i + 1}/{total}..."
-                            )
-                            try:
-                                product = translate_product_data(
-                                    product
-                                )
-                            except Exception as te:
-                                st.warning(
-                                    f"⚠️ Traducere eșuată: "
-                                    f"{str(te)[:80]}"
-                                )
-
-                        st.session_state.scraped_products.append(
-                            product
+            try:
+                # ═══ PASUL 3: Găsim input file ═══
+                file_input = None
+                for sel in [
+                    "input[type='file']",
+                    "input[name='file']",
+                    "input[name='import_file']",
+                    "input[name='importFile']",
+                    "input[accept*='.xls']",
+                    "input[accept*='.xlsx']",
+                    "input[accept*='.csv']",
+                    "input[accept*='.tsv']",
+                ]:
+                    try:
+                        fi = self.driver.find_element(
+                            By.CSS_SELECTOR, sel
                         )
+                        file_input = fi
+                        st.info(f"✅ Input file găsit: [{sel}]")
+                        break
+                    except NoSuchElementException:
+                        continue
 
-                        with results_container:
-                            colors_info = ""
-                            if product.get('colors'):
-                                colors_info = (
-                                    f" | 🎨 "
-                                    f"{len(product['colors'])} culori"
-                                )
-                            st.success(
-                                f"✅ [{i + 1}/{total}] "
-                                f"{product.get('name', 'N/A')} "
-                                f"| Preț: "
-                                f"{product.get('final_price', 0):.2f}"
-                                f" LEI "
-                                f"| SKU: "
-                                f"{product.get('sku', 'N/A')}"
-                                f"{colors_info}"
-                            )
-                    else:
-                        with results_container:
-                            st.warning(
-                                f"⚠️ [{i + 1}/{total}] "
-                                f"Nu am putut extrage: "
-                                f"{url[:80]}"
-                            )
-
-                except Exception as e:
-                    with results_container:
+                if not file_input:
+                    # Fallback: orice input file
+                    try:
+                        file_input = self.driver.find_element(
+                            By.CSS_SELECTOR, "input[type='file']"
+                        )
+                    except NoSuchElementException:
                         st.error(
-                            f"❌ [{i + 1}/{total}] "
-                            f"Eroare: {str(e)[:100]}"
+                            "❌ Nu găsesc câmpul de upload fișier!"
                         )
+                        self._save_screenshot("ERROR_no_file_input")
+                        return False
 
-                # Delay între request-uri
-                time.sleep(2)
+                # ═══ PASUL 4: Upload fișier ═══
+                file_input.send_keys(tmp_path)
+                time.sleep(3)
+                st.info("📤 Fișier atașat, aștept procesarea...")
 
-            # Închidem scraperele
-            for scraper in active_scrapers.values():
+                # ═══ PASUL 5: Click Selectează Fișier (dacă e nevoie) ═══
+                select_btns = [
+                    "button[class*='select']",
+                    "button[class*='upload']",
+                    "input[value*='Selecteaza']",
+                    "input[value*='Select']",
+                    "button:contains('Selecteaza')",
+                ]
+                for sel in select_btns:
+                    try:
+                        btn = self.driver.find_element(
+                            By.CSS_SELECTOR, sel
+                        )
+                        if btn.is_displayed():
+                            self.driver.execute_script(
+                                "arguments[0].click();", btn
+                            )
+                            time.sleep(3)
+                            st.info("✅ Click pe Selectează Fișier")
+                            break
+                    except NoSuchElementException:
+                        continue
+
+                # Căutăm butonul prin XPath
                 try:
-                    scraper.close()
+                    btns = self.driver.find_elements(
+                        By.XPATH,
+                        "//button[contains(text(), 'Selecteaza')] | "
+                        "//input[@value='Selecteaza Fisier'] | "
+                        "//button[contains(text(), 'Select')]"
+                    )
+                    for btn in btns:
+                        if btn.is_displayed():
+                            self.driver.execute_script(
+                                "arguments[0].click();", btn
+                            )
+                            time.sleep(3)
+                            st.info(
+                                "✅ Click Selectează (XPath)"
+                            )
+                            break
                 except Exception:
                     pass
 
-            progress_bar.progress(1.0)
-            status_text.text(
-                f"✅ Finalizat! "
-                f"{len(st.session_state.scraped_products)} "
-                f"produse extrase din {total}"
-            )
+                time.sleep(3)
+                self._save_screenshot("2_dupa_upload_fisier")
 
-            if translate_option:
-                st.session_state.translated_products = (
-                    st.session_state.scraped_products.copy()
+                # ═══ PASUL 6: Așteptăm tabelul de mapare ═══
+                # Gomag arată un tabel cu coloanele detectate
+                # și dropdown-uri pentru a le mapa
+                st.info(
+                    "⏳ Aștept detectarea coloanelor..."
                 )
 
-    # AFIȘARE PRODUSE EXTRASE
-    if st.session_state.scraped_products:
-        st.markdown("---")
-        st.subheader(
-            f"📦 Produse Extrase "
-            f"({len(st.session_state.scraped_products)})"
-        )
-
-        for idx, product in enumerate(
-            st.session_state.scraped_products
-        ):
-            # Label expander
-            colors_count = len(product.get('colors', []))
-            images_count = len(product.get('images', []))
-
-            expander_label = (
-                f"{'✅' if product.get('status') == 'scraped' else '⚠️'}"
-                f" {product.get('name', 'N/A')} | "
-                f"SKU: {product.get('sku', 'N/A')} | "
-                f"Preț: {product.get('final_price', 0):.2f} LEI"
-            )
-            if colors_count > 0:
-                expander_label += f" | 🎨 {colors_count} culori"
-            if images_count > 0:
-                expander_label += f" | 📷 {images_count} img"
-
-            with st.expander(expander_label):
-                col_info, col_img = st.columns([2, 1])
-
-                with col_info:
-                    st.write(
-                        f"**Nume:** {product.get('name', 'N/A')}"
-                    )
-                    st.write(
-                        f"**SKU:** {product.get('sku', 'N/A')}"
-                    )
-                    st.write(
-                        f"**Preț original:** "
-                        f"{product.get('original_price', 0):.2f} "
-                        f"{product.get('currency', 'EUR')}"
-                    )
-                    st.write(
-                        f"**Preț final (x2):** "
-                        f"{product.get('final_price', 0):.2f} LEI"
-                    )
-                    st.write(
-                        f"**Stoc:** {product.get('stock', 1)}"
-                    )
-                    st.write(
-                        f"**Sursă:** "
-                        f"{product.get('source_site', 'N/A')}"
-                    )
-                    st.write(
-                        f"**URL:** "
-                        f"{product.get('source_url', '')}"
-                    )
-
-                    if product.get('material'):
-                        st.write(
-                            f"**Material:** "
-                            f"{product.get('material')}"
-                        )
-                    if product.get('dimensions'):
-                        st.write(
-                            f"**Dimensiuni:** "
-                            f"{product.get('dimensions')}"
-                        )
-                    if product.get('weight'):
-                        st.write(
-                            f"**Greutate:** "
-                            f"{product.get('weight')}"
-                        )
-
-                    # Culori
-                    if product.get('colors'):
-                        st.write(
-                            f"**Culori "
-                            f"({len(product['colors'])}):** "
-                            f"{', '.join(product['colors'])}"
-                        )
-
-                    # Variante culoare cu imagini
-                    if product.get('color_variants'):
-                        st.write(
-                            f"**Variante culoare:** "
-                            f"{len(product['color_variants'])}"
-                        )
-                        num_cols = min(
-                            len(product['color_variants']), 4
-                        )
-                        if num_cols > 0:
-                            variant_cols = st.columns(num_cols)
-                            for vi, variant in enumerate(
-                                product['color_variants'][:8]
-                            ):
-                                col_idx = vi % num_cols
-                                with variant_cols[col_idx]:
-                                    v_name = variant.get(
-                                        'name', 'N/A'
-                                    )
-                                    if variant.get('image'):
-                                        try:
-                                            img_url = (
-                                                make_absolute_url(
-                                                    variant['image'],
-                                                    product.get(
-                                                        'source_url',
-                                                        ''
-                                                    )
-                                                )
-                                            )
-                                            st.image(
-                                                img_url,
-                                                caption=v_name,
-                                                width=80,
-                                            )
-                                        except Exception:
-                                            st.write(
-                                                f"🎨 {v_name}"
-                                            )
-                                    else:
-                                        st.write(f"🎨 {v_name}")
-
-                    # Specificații
-                    if product.get('specifications'):
-                        st.write("**Specificații:**")
-                        for k, v in (
-                            product['specifications'].items()
-                        ):
-                            st.write(f"  - {k}: {v}")
-
-                with col_img:
-                    images = product.get('images', [])
-                    if images:
-                        try:
-                            st.image(
-                                images[0],
-                                caption="Imagine principală",
-                                width=250,
-                            )
-                        except Exception:
-                            st.write(f"🖼️ {images[0][:60]}...")
-
-                        if len(images) > 1:
-                            st.write(
-                                f"📷 +{len(images) - 1} imagini:"
-                            )
-                            thumb_count = min(
-                                len(images) - 1, 3
-                            )
-                            thumb_cols = st.columns(thumb_count)
-                            for img_i, img_url in enumerate(
-                                images[1:4]
-                            ):
-                                with thumb_cols[
-                                    img_i % thumb_count
-                                ]:
-                                    try:
-                                        st.image(
-                                            img_url, width=80
-                                        )
-                                    except Exception:
-                                        st.write("🖼️")
-                            if len(images) > 4:
-                                st.write(
-                                    f"... și încă "
-                                    f"{len(images) - 4}"
-                                )
-                    else:
-                        st.write("❌ Fără imagini")
-
-                # Editare inline
-                st.markdown("---")
-                with st.form(key=f"edit_product_{idx}"):
-                    ec1, ec2, ec3 = st.columns(3)
-                    with ec1:
-                        new_name = st.text_input(
-                            "Editează numele:",
-                            value=product.get('name', ''),
-                            key=f"name_{idx}",
-                        )
-                    with ec2:
-                        new_price = st.number_input(
-                            "Editează prețul (LEI):",
-                            value=float(
-                                product.get('final_price', 1.0)
-                            ),
-                            min_value=0.01,
-                            step=0.01,
-                            key=f"price_{idx}",
-                        )
-                    with ec3:
-                        new_sku = st.text_input(
-                            "Editează SKU:",
-                            value=product.get('sku', ''),
-                            key=f"sku_{idx}",
-                        )
-
-                    new_desc = st.text_area(
-                        "Editează descrierea:",
-                        value=product.get(
-                            'description', ''
-                        )[:500],
-                        height=100,
-                        key=f"desc_{idx}",
-                    )
-
-                    if st.form_submit_button(
-                        "💾 Salvează modificările"
-                    ):
-                        sp = st.session_state.scraped_products
-                        sp[idx]['name'] = new_name
-                        sp[idx]['final_price'] = new_price
-                        sp[idx]['sku'] = new_sku
-                        if new_desc:
-                            sp[idx]['description'] = new_desc
-                        st.success("✅ Modificări salvate!")
-                        st.rerun()
-
-        # Buton pentru a trece la pasul 2
-        st.markdown("---")
-        col_next1, col_next2 = st.columns(2)
-
-        with col_next1:
-            if st.button(
-                "➡️ Continuă la Pasul 2: Import în Gomag",
-                type="primary",
-                use_container_width=True,
-            ):
-                st.session_state.translated_products = (
-                    st.session_state.scraped_products.copy()
-                )
-                st.session_state.step = 2
-                st.rerun()
-
-        with col_next2:
-            if st.button(
-                "🗑️ Șterge toate produsele extrase",
-                type="secondary",
-                use_container_width=True,
-            ):
-                st.session_state.scraped_products = []
-                st.session_state.translated_products = []
-                st.rerun()
-
-        # Export
-        st.markdown("---")
-        st.subheader("💾 Export Date Intermediare")
-
-        col_exp1, col_exp2 = st.columns(2)
-
-        with col_exp1:
-            json_data = json.dumps(
-                st.session_state.scraped_products,
-                indent=2,
-                ensure_ascii=False,
-                default=str,
-            )
-            st.download_button(
-                label="📥 Descarcă JSON",
-                data=json_data,
-                file_name="produse_extrase.json",
-                mime="application/json",
-            )
-
-        with col_exp2:
-            export_data = []
-            for p in st.session_state.scraped_products:
-                export_data.append({
-                    'Nume': p.get('name', ''),
-                    'SKU': p.get('sku', ''),
-                    'Preț Original': p.get('original_price', 0),
-                    'Moneda': p.get('currency', 'EUR'),
-                    'Preț Final LEI': p.get('final_price', 0),
-                    'Stoc': p.get('stock', 1),
-                    'Culori': ', '.join(p.get('colors', [])),
-                    'Nr Variante': len(
-                        p.get('color_variants', [])
-                    ),
-                    'Nr Imagini': len(p.get('images', [])),
-                    'Imagini': ' | '.join(
-                        p.get('images', [])[:5]
-                    ),
-                    'Sursă': p.get('source_url', ''),
-                    'Site': p.get('source_site', ''),
-                })
-            df_export = pd.DataFrame(export_data)
-            excel_buffer = io.BytesIO()
-            df_export.to_excel(
-                excel_buffer, index=False, engine='openpyxl'
-            )
-            excel_buffer.seek(0)
-            st.download_button(
-                label="📥 Descarcă Excel",
-                data=excel_buffer,
-                file_name="produse_extrase.xlsx",
-                mime=(
-                    "application/vnd.openxmlformats-"
-                    "officedocument.spreadsheetml.sheet"
-                ),
-            )
-
-
-# ══════════════════════════════════════════════
-# PAS 2: VERIFICARE & IMPORT ÎN GOMAG
-# ══════════════════════════════════════════════
-elif st.session_state.step == 2:
-    st.header("📝 Pas 2: Verificare & Import în Gomag.ro")
-
-    products = (
-        st.session_state.translated_products
-        or st.session_state.scraped_products
-    )
-
-    if not products:
-        st.warning(
-            "⚠️ Nu ai produse de importat. "
-            "Întoarce-te la Pasul 1."
-        )
-
-        st.subheader("📂 Importă din JSON salvat anterior")
-        json_upload = st.file_uploader(
-            "Încarcă fișier JSON cu produse",
-            type=['json'],
-            key="json_upload_empty",
-        )
-        if json_upload:
-            try:
-                imported = json.loads(
-                    json_upload.read().decode('utf-8')
-                )
-                if isinstance(imported, list) and imported:
-                    st.session_state.translated_products = imported
-                    st.success(
-                        f"✅ {len(imported)} produse "
-                        f"importate din JSON"
-                    )
-                    st.rerun()
-            except Exception as e:
-                st.error(f"❌ Eroare citire JSON: {str(e)}")
-
-        if st.button("⬅️ Înapoi la Pasul 1"):
-            st.session_state.step = 1
-            st.rerun()
-        st.stop()
-
-    # ---- IMPORT JSON (opțional) ----
-    with st.expander("📂 Importă din JSON salvat anterior"):
-        json_upload = st.file_uploader(
-            "Încarcă fișier JSON cu produse",
-            type=['json'],
-            key="json_upload_step2",
-        )
-        if json_upload:
-            try:
-                imported = json.loads(
-                    json_upload.read().decode('utf-8')
-                )
-                if isinstance(imported, list) and imported:
-                    st.session_state.translated_products = imported
-                    products = imported
-                    st.success(
-                        f"✅ {len(imported)} produse "
-                        f"importate din JSON"
-                    )
-                    st.rerun()
-            except Exception as e:
-                st.error(f"❌ Eroare citire JSON: {str(e)}")
-
-    st.markdown("---")
-
-    # ---- CONFIGURARE IMPORT ----
-    st.subheader("⚙️ Configurare Import")
-
-    col_cfg1, col_cfg2, col_cfg3 = st.columns(3)
-
-    with col_cfg1:
-        category_name = st.text_input(
-            "📂 Categorie Gomag:",
-            value="Rucsacuri Anti-Furt",
-            help="Numele exact al categoriei din Gomag",
-        )
-
-    with col_cfg2:
-        brand_name = st.text_input(
-            "🏷️ Brand (opțional):",
-            value="",
-            help="Lasă gol pentru auto-detect din sursă",
-        )
-
-    with col_cfg3:
-        import_method = st.selectbox(
-            "📤 Metodă import:",
-            options=[
-                "Descarcă CSV (recomandat)",
-                "Descarcă Excel",
-                "Upload automat în Gomag",
-            ],
-            index=0,
-            help=(
-                "CSV/Excel: descarci fișierul și îl imporți "
-                "manual în Gomag. Upload automat: se face "
-                "prin browser automation."
-            ),
-        )
-
-    # Opțiune variante
-    import_variants = st.checkbox(
-        "🎨 Importă fiecare culoare ca produs separat",
-        value=False,
-        help=(
-            "Dacă e bifat, fiecare variantă de culoare "
-            "devine un rând separat în CSV."
-        ),
-    )
-
-    st.markdown("---")
-
-    # ---- TABEL PRODUSE PENTRU VERIFICARE ----
-    st.subheader(f"📋 Produse de importat ({len(products)})")
-
-    display_data = []
-    for p in products:
-        colors_str = ', '.join(p.get('colors', [])[:3])
-        if len(p.get('colors', [])) > 3:
-            colors_str += f" +{len(p['colors']) - 3}"
-
-        display_data.append({
-            'Import': True,
-            'Nume': p.get('name', 'N/A')[:60],
-            'SKU': p.get('sku', 'N/A'),
-            'Preț (LEI)': round(
-                float(p.get('final_price', 1.0)), 2
-            ),
-            'Culori': colors_str or 'N/A',
-            'Imagini': len(p.get('images', [])),
-            'Sursă': p.get('source_site', 'N/A'),
-        })
-
-    df_display = pd.DataFrame(display_data)
-
-    edited_df = st.data_editor(
-        df_display,
-        use_container_width=True,
-        num_rows="fixed",
-        column_config={
-            "Import": st.column_config.CheckboxColumn(
-                "Import?",
-                help="Bifează produsele de importat",
-                default=True,
-            ),
-            "Preț (LEI)": st.column_config.NumberColumn(
-                "Preț (LEI)",
-                min_value=0.01,
-                format="%.2f",
-            ),
-            "Imagini": st.column_config.NumberColumn(
-                "Imagini",
-            ),
-            "Culori": st.column_config.TextColumn(
-                "Culori",
-            ),
-        },
-        hide_index=True,
-    )
-
-    st.markdown("---")
-
-    # ---- FILTRARE PRODUSE SELECTATE ----
-    products_to_import = []
-    if edited_df is not None:
-        for i, row in edited_df.iterrows():
-            if row.get('Import', True):
-                if i < len(products):
+                # Așteptăm până apare tabelul sau selecturile
+                max_wait = 30
+                table_found = False
+                for _ in range(max_wait):
                     try:
-                        new_price = float(
-                            row.get('Preț (LEI)', 1.0)
+                        selects = self.driver.find_elements(
+                            By.CSS_SELECTOR, "select"
                         )
-                        products[i]['final_price'] = new_price
-                    except (ValueError, TypeError):
+                        visible_selects = [
+                            s for s in selects
+                            if s.is_displayed()
+                        ]
+                        if len(visible_selects) >= 3:
+                            table_found = True
+                            st.info(
+                                f"✅ {len(visible_selects)} "
+                                f"selecturi de mapare detectate"
+                            )
+                            break
+                    except Exception:
                         pass
-                    products_to_import.append(products[i])
+                    time.sleep(1)
 
-    # Expandăm variante dacă necesar
-    final_products = []
-    if import_variants:
-        for product in products_to_import:
-            color_variants = product.get('color_variants', [])
-            if color_variants and len(color_variants) > 1:
-                for variant in color_variants:
-                    vp = product.copy()
-                    v_name = variant.get('name', '')
-                    vp['name'] = (
-                        f"{product['name']} - {v_name}"
+                if not table_found:
+                    st.warning(
+                        "⚠️ Nu am detectat selecturi de mapare. "
+                        "Posibil corelarea automată e activă."
                     )
-                    vp['sku'] = (
-                        f"{product['sku']}-"
-                        f"{v_name.upper()[:5]}"
-                        if product.get('sku')
-                        else ''
+
+                self._save_screenshot("3_mapare_coloane")
+
+                # ═══ PASUL 7: Bifăm opțiunile corecte ═══
+
+                # Checkbox: "Salvează corelarea ca template"
+                try:
+                    checkboxes = self.driver.find_elements(
+                        By.CSS_SELECTOR, "input[type='checkbox']"
                     )
-                    vp['colors'] = [v_name]
-                    if variant.get('image'):
-                        v_img = make_absolute_url(
-                            variant['image'],
-                            product.get('source_url', ''),
-                        )
-                        vp['images'] = (
-                            [v_img]
-                            + [
-                                img
-                                for img in product.get(
-                                    'images', []
-                                )
-                                if img != v_img
+                    for cb in checkboxes:
+                        try:
+                            label = self.driver.find_element(
+                                By.CSS_SELECTOR,
+                                f"label[for='{cb.get_attribute('id')}']"
+                            )
+                            label_text = label.text.lower()
+
+                            # Bifăm "Ignora prima linie"
+                            if (
+                                'ignora' in label_text
+                                or 'prima' in label_text
+                                or 'first' in label_text
+                                or 'header' in label_text
+                            ):
+                                if not cb.is_selected():
+                                    self.driver.execute_script(
+                                        "arguments[0].click();", cb
+                                    )
+                                    st.info(
+                                        "✅ Bifat: Ignoră prima linie"
+                                    )
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+
+                # ═══ PASUL 8: Click Start Import ═══
+                st.info("🚀 Caut butonul Start Import...")
+                time.sleep(2)
+
+                import_clicked = False
+
+                # Metoda 1: Buton cu text "Start Import"
+                try:
+                    btns = self.driver.find_elements(
+                        By.XPATH,
+                        "//button[contains(text(), 'Start Import')] | "
+                        "//input[@value='Start Import'] | "
+                        "//a[contains(text(), 'Start Import')] | "
+                        "//button[contains(text(), 'Import')] | "
+                        "//button[contains(text(), 'Importa')]"
+                    )
+                    for btn in btns:
+                        if btn.is_displayed():
+                            self.driver.execute_script(
+                                "arguments[0].scrollIntoView("
+                                "{block: 'center'});",
+                                btn
+                            )
+                            time.sleep(0.5)
+                            self.driver.execute_script(
+                                "arguments[0].click();", btn
+                            )
+                            import_clicked = True
+                            st.info(
+                                f"✅ Click pe: {btn.text.strip()}"
+                            )
+                            break
+                except Exception:
+                    pass
+
+                # Metoda 2: CSS selectori
+                if not import_clicked:
+                    for sel in [
+                        "button[type='submit']",
+                        "input[type='submit']",
+                        "button.btn-primary",
+                        "button.btn-success",
+                        "button[class*='import']",
+                        "button[class*='start']",
+                        "#startImport",
+                        ".start-import",
+                    ]:
+                        try:
+                            btn = self.driver.find_element(
+                                By.CSS_SELECTOR, sel
+                            )
+                            if btn.is_displayed():
+                                btn_text = btn.text.strip()
+                                if (
+                                    'import' in btn_text.lower()
+                                    or 'start' in btn_text.lower()
+                                    or not btn_text
+                                ):
+                                    self.driver.execute_script(
+                                        "arguments[0].click();", btn
+                                    )
+                                    import_clicked = True
+                                    st.info(
+                                        f"✅ Click pe: "
+                                        f"[{sel}] '{btn_text}'"
+                                    )
+                                    break
+                        except NoSuchElementException:
+                            continue
+
+                if not import_clicked:
+                    st.error(
+                        "❌ Nu am găsit butonul Start Import!"
+                    )
+                    self._save_screenshot("ERROR_no_start_import")
+                    return False
+
+                # ═══ PASUL 9: Așteptăm finalizarea ═══
+                st.info("⏳ Import în curs, aștept finalizarea...")
+
+                # Așteptăm până la 120 secunde
+                for wait_sec in range(0, 120, 5):
+                    time.sleep(5)
+                    try:
+                        page = self.driver.page_source.lower()
+                        cur = self.driver.current_url.lower()
+
+                        # Verificăm succes
+                        if any(
+                            msg in page
+                            for msg in [
+                                'import finalizat',
+                                'import complet',
+                                'importul a fost finalizat',
+                                'produse importate',
+                                'import successful',
+                                'successfully imported',
+                                'produse adaugate',
                             ]
+                        ):
+                            st.success(
+                                "✅ Import finalizat cu succes!"
+                            )
+                            self._save_screenshot(
+                                "SUCCESS_import"
+                            )
+                            return True
+
+                        # Verificăm eroare
+                        if any(
+                            msg in page
+                            for msg in [
+                                'eroare import',
+                                'import error',
+                                'import failed',
+                                'eroare la import',
+                            ]
+                        ):
+                            st.error("❌ Eroare la import!")
+                            self._save_screenshot(
+                                "ERROR_import"
+                            )
+                            return False
+
+                        # Verificăm dacă pagina s-a schimbat
+                        # (redirect după import)
+                        if (
+                            'import' not in cur
+                            and 'product' in cur
+                        ):
+                            st.success(
+                                "✅ Import probabil reușit "
+                                "(redirect detectat)"
+                            )
+                            self._save_screenshot(
+                                "REDIRECT_after_import"
+                            )
+                            return True
+
+                    except Exception:
+                        pass
+
+                    if wait_sec % 15 == 0 and wait_sec > 0:
+                        st.info(
+                            f"⏳ Încă aștept... "
+                            f"({wait_sec}s)"
                         )
-                    final_products.append(vp)
-            else:
-                final_products.append(product)
-    else:
-        final_products = products_to_import
 
-    st.write(
-        f"**{len(final_products)} produse pregătite "
-        f"pentru export/import**"
-    )
-
-    st.markdown("---")
-
-    # ---- GENERARE & DOWNLOAD CSV/EXCEL ----
-    st.subheader("📥 Generare Fișier Import Gomag")
-
-    importer = GomagImporter()
-
-    if import_method == "Descarcă CSV (recomandat)":
-        if st.button(
-            f"📥 Generează CSV Gomag "
-            f"({len(final_products)} produse)",
-            type="primary",
-            use_container_width=True,
-            disabled=len(final_products) == 0,
-        ):
-            csv_bytes = importer.generate_csv_file(
-                final_products, category_name, brand_name
-            )
-
-            st.success(
-                f"✅ CSV generat cu "
-                f"{len(final_products)} produse!"
-            )
-
-            st.download_button(
-                label="📥 Descarcă CSV pentru Gomag",
-                data=csv_bytes,
-                file_name="import_gomag.csv",
-                mime="text/csv",
-            )
-
-            # Preview
-            df_preview = importer.generate_gomag_csv(
-                final_products, category_name, brand_name
-            )
-            with st.expander("👁️ Preview CSV"):
-                preview_cols = [
-                    'Cod Produs (SKU)',
-                    'Denumire Produs',
-                    'Pret Produs: Descriere',
-                    'Atribute: Culoare (variante de produs)',
-                    'Stoc Cantitativ',
-                    'Activ in Magazin',
-                    'Categorie / Categorii',
-                    'Marca (Brand)',
-                    'URL Poza de Produs',
-                ]
-                available_cols = [
-                    c for c in preview_cols
-                    if c in df_preview.columns
-                ]
-                st.dataframe(
-                    df_preview[available_cols],
-                    use_container_width=True,
+                # Timeout
+                st.warning(
+                    "⚠️ Timeout așteptare import (120s). "
+                    "Verifică manual în Gomag."
                 )
+                self._save_screenshot("TIMEOUT_import")
+                return True
 
-    elif import_method == "Descarcă Excel":
-        if st.button(
-            f"📥 Generează Excel Gomag "
-            f"({len(final_products)} produse)",
-            type="primary",
-            use_container_width=True,
-            disabled=len(final_products) == 0,
-        ):
-            excel_bytes = importer.generate_excel_file(
-                final_products, category_name, brand_name
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+
+        except Exception as e:
+            st.error(f"❌ Eroare upload: {str(e)}")
+            self._save_screenshot("ERROR_upload")
+            return False
+
+    def import_product(
+        self, product: dict,
+        category_id: str = "",
+        category_name: str = "",
+    ) -> bool:
+        try:
+            csv_bytes = self.generate_csv_file(
+                [product], category_name
             )
+            return self.upload_csv_to_gomag(csv_bytes)
+        except Exception as e:
+            st.error(f"❌ Eroare import: {str(e)}")
+            return False
 
-            st.success(
-                f"✅ Excel generat cu "
-                f"{len(final_products)} produse!"
-            )
+    def close(self):
+        if self.driver:
+            try:
+                self.driver.quit()
+            except Exception:
+                pass
+            self.driver = None
+        self.logged_in = False
 
-            st.download_button(
-                label="📥 Descarcă Excel pentru Gomag",
-                data=excel_bytes,
-                file_name="import_gomag.xlsx",
-                mime=(
-                    "application/vnd.openxmlformats-"
-                    "officedocument.spreadsheetml.sheet"
-                ),
-            )
-
-    elif import_method == "Upload automat în Gomag":
-        st.warning(
-            "⚠️ Upload-ul automat necesită ca Gomag să aibă "
-            "funcția de import CSV activă. Recomandat: "
-            "descarcă CSV și importă manual."
-        )
-
-        if st.button(
-            f"🚀 Upload CSV automat "
-            f"({len(final_products)} produse)",
-            type="primary",
-            use_container_width=True,
-            disabled=len(final_products) == 0,
-        ):
-            csv_bytes = importer.generate_csv_file(
-                final_products, category_name, brand_name
-            )
-
-            with st.spinner("Se conectează la Gomag..."):
-                if importer.login():
-                    success = importer.upload_csv_to_gomag(
-                        csv_bytes
-                    )
-                    if success:
-                        st.success("✅ CSV uploadat cu succes!")
-                    else:
-                        st.error(
-                            "❌ Upload eșuat. Descarcă CSV-ul "
-                            "și importă manual."
-                        )
-                        st.download_button(
-                            label="📥 Descarcă CSV (fallback)",
-                            data=csv_bytes,
-                            file_name="import_gomag.csv",
-                            mime="text/csv",
-                        )
-                else:
-                    st.error("❌ Login Gomag eșuat!")
-
-            importer.close()
-
-    st.markdown("---")
-
-    # ---- INSTRUCȚIUNI IMPORT MANUAL ----
-    with st.expander("📖 Cum import CSV-ul în Gomag?"):
-        st.markdown("""
-        ### Pași pentru import manual:
-        1. Descarcă fișierul CSV de mai sus
-        2. Conectează-te la **Gomag Admin Panel**
-        3. Navighează la **Produse → Import Produse**
-        4. Selectează fișierul CSV descărcat
-        5. Mapează coloanele (ar trebui să fie automat)
-        6. Click **Importă**
-        7. Verifică produsele importate
-
-        ### Note:
-        - Prețul include TVA 19%
-        - Stocul este setat la 1 pentru toate produsele
-        - Produsele sunt active imediat
-        - Imaginile sunt link-uri externe (URL-uri)
-        - Dacă un produs nu are preț, este setat la 1 LEU
-        - Culorile sunt listate ca atribute/variante
-        - Durata de livrare: 2-5 zile lucrătoare
-        """)
-
-    # Buton înapoi
-    st.markdown("---")
-    if st.button("⬅️ Înapoi la Pasul 1"):
-        st.session_state.step = 1
-        st.rerun()
-
-
-# ──────────────────────────────────────────────
-# FOOTER
-# ──────────────────────────────────────────────
-st.markdown("---")
-st.markdown(
-    "<div style='text-align: center; color: gray;'>"
-    "🎒 Anti-Theft Backpack Importer v2.0 | "
-    "Selenium + Cloudscraper + Streamlit | "
-    "Export CSV/Excel compatibil Gomag"
-    "</div>",
-    unsafe_allow_html=True,
-)
+    def __del__(self):
+        self.close()
