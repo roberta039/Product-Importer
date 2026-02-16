@@ -1,0 +1,26 @@
+# packages.txt
+chromium
+chromium-driver
+libglib2.0-0
+libnss3
+libgconf-2-4
+libfontconfig1
+libxss1
+libasound2
+libxtst6
+xdg-utils
+fonts-liberation
+libappindicator3-1
+libatk-bridge2.0-0
+libatspi2.0-0
+libdrm2
+libgbm1
+libgtk-3-0
+libnspr4
+libpango-1.0-0
+libxcomposite1
+libxdamage1
+libxrandr2
+wget
+curl
+unzip
