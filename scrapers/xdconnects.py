@@ -1,435 +1,806 @@
+# scrapers/xdconnects.py
+# VERSIUNE 5.0 - fix EUR, imagini, culori, screenshot debug
 """
-XD Connects scraper (Selenium).
-
-Goals:
-- Login (if credentials provided)
-- Extract: title, sku, price, description, specifications, colors, images
-- Robust against XD's JS-driven tabs/accordions.
+Scraper XD Connects v5.0
+- Preț: EUR și RON
+- Imagini: src direct + background-image
+- Culori: swatch mic
+- Screenshot debug
 """
-
-from __future__ import annotations
-
 import re
 import time
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Union
-
+from bs4 import BeautifulSoup
+from scrapers.base_scraper import BaseScraper
+from utils.helpers import clean_price
+from utils.image_handler import make_absolute_url
+import streamlit as st
 from selenium.webdriver.common.by import By
-from selenium.webdriver.remote.webdriver import WebDriver
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.keys import Keys
 from selenium.common.exceptions import (
-    TimeoutException,
-    StaleElementReferenceException,
-    ElementClickInterceptedException,
-    WebDriverException,
+    NoSuchElementException, StaleElementReferenceException,
 )
 
-# If your project has a shared logger, replace prints with logger.*
-def _log(msg: str) -> None:
-    print(msg)
 
 
-XD_SCRAPER_VERSION = "2026-02-17-xdconnects-full"
+XD_SCRAPER_VERSION = "2026-02-17-xd-colors-hotfix-1"
+print("XD SCRAPER VERSION:", XD_SCRAPER_VERSION)
 
-
-# -----------------------------
-# Helpers
-# -----------------------------
-def _clean(s: str) -> str:
-    return re.sub(r"\s+", " ", (s or "").strip())
-
-
-def _as_float_price(value: str) -> Optional[float]:
-    """Parse price like "€ 73,80" or "73.8"."""
-    if not value:
-        return None
-    txt = value.replace("\xa0", " ")
-    txt = re.sub(r"[^\d,\.]", "", txt)
-    if not txt:
-        return None
-    if "," in txt and "." in txt:
-        if txt.rfind(",") > txt.rfind("."):
-            txt = txt.replace(".", "").replace(",", ".")
-        else:
-            txt = txt.replace(",", "")
-    else:
-        if "," in txt and "." not in txt:
-            txt = txt.replace(",", ".")
-    try:
-        return float(txt)
-    except ValueError:
-        return None
-
-
-def _dedupe_preserve(items: List[str]) -> List[str]:
-    seen = set()
-    out: List[str] = []
-    for x in items:
-        x = (x or "").strip()
-        if not x:
-            continue
-        key = x.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(x)
-    return out
-
-
-def _specs_to_dict(specs: Union[Dict[str, str], List[Tuple[str, str]], None]) -> Dict[str, str]:
-    if specs is None:
-        return {}
-    if isinstance(specs, dict):
-        return {str(k).strip(): str(v).strip() for k, v in specs.items() if str(k).strip()}
-    d: Dict[str, str] = {}
-    try:
-        for k, v in specs:
-            ks = str(k).strip()
-            vs = str(v).strip()
-            if ks:
-                d[ks] = vs
-    except Exception:
-        pass
-    return d
-
-
-def _extract_colour_from_text(raw_text: str) -> Optional[str]:
+def _extract_colour_from_text(raw_text: str):
     if not raw_text:
         return None
+    # 1) 'Colour <valoare>'
     m = re.search(r"\bColour\b\s*[:\t ]+\s*([^\n\r\t]+)", raw_text, flags=re.IGNORECASE)
     if m:
         val = m.group(1).strip()
         val = re.split(r"\s{2,}|\t|•|\|", val)[0].strip()
         if 1 <= len(val) <= 40:
             return val
+    # 2) dupa 'Item no. P705.xxx' de obicei e culoarea pe linia urmatoare
     m = re.search(r"Item no\.\s*[A-Z0-9\.]+\s*\n([A-Za-z][A-Za-z \-]{2,40})\n", raw_text)
-    if m:
-        return m.group(1).strip()
-    m = re.search(r"\bColour:\s*\n?([A-Za-z][A-Za-z \-]{2,40})\b", raw_text, flags=re.IGNORECASE)
     if m:
         return m.group(1).strip()
     return None
 
+class XDConnectsScraper(BaseScraper):
+    def __init__(self):
+        super().__init__()
+        self.name = "xdconnects"
+        self.base_url = "https://www.xdconnects.com"
+        self._logged_in = False
 
-def _safe_click(driver: WebDriver, el) -> bool:
-    try:
-        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
-        time.sleep(0.1)
-        el.click()
-        return True
-    except (ElementClickInterceptedException, StaleElementReferenceException, WebDriverException):
-        try:
-            driver.execute_script("arguments[0].click();", el)
-            return True
-        except Exception:
-            return False
-
-
-def _click_by_text(driver: WebDriver, texts: List[str], timeout: int = 6) -> bool:
-    for t in texts:
-        if not t:
-            continue
-        xpath = f"//*[self::button or self::a or self::span or self::div][normalize-space()='{t}']"
-        try:
-            el = WebDriverWait(driver, timeout).until(EC.presence_of_element_located((By.XPATH, xpath)))
-            if el and el.is_displayed():
-                if _safe_click(driver, el):
-                    return True
-        except TimeoutException:
-            continue
-    for t in texts:
-        if not t:
-            continue
-        tt = t.strip()
-        if not tt:
-            continue
-        xpath = (
-            "//*[self::button or self::a or self::span or self::div]"
-            "[contains(translate(normalize-space(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), "
-            f"'{tt.lower()}')]"
-        )
-        try:
-            el = WebDriverWait(driver, timeout).until(EC.presence_of_element_located((By.XPATH, xpath)))
-            if el and el.is_displayed():
-                if _safe_click(driver, el):
-                    return True
-        except TimeoutException:
-            continue
-    return False
-
-
-def _wait_dom_stable(seconds: float = 0.8) -> None:
-    time.sleep(seconds)
-
-
-def _extract_images(driver: WebDriver, base_url: str) -> List[str]:
-    urls: List[str] = []
-    try:
-        imgs = driver.find_elements(By.CSS_SELECTOR, "img")
-    except Exception:
-        imgs = []
-    for img in imgs:
-        try:
-            src = img.get_attribute("src") or ""
-            data_src = img.get_attribute("data-src") or ""
-            cand = src or data_src
-            if not cand or "data:image" in cand:
-                continue
-            if "/product/image/" in cand:
-                urls.append(cand if cand.startswith("http") else base_url.rstrip("/") + cand)
-        except Exception:
-            continue
-    return _dedupe_preserve(urls)
-
-
-def _parse_details_text(details_text: str) -> Tuple[str, List[Tuple[str, str]]]:
-    lines = [l.strip() for l in (details_text or "").splitlines()]
-    lines = [l for l in lines if l]
-    specs: List[Tuple[str, str]] = []
-    desc = ""
-
-    if "Description" in lines:
-        i = lines.index("Description")
-        desc_parts = []
-        for j in range(i + 1, len(lines)):
-            if lines[j] in {"Product USPs", "Primary specifications", "Specifications", "Sustainability", "ESG Features"}:
-                break
-            desc_parts.append(lines[j])
-        desc = _clean(" ".join(desc_parts))
-
-    skip_headers = {"Product details", "Primary specifications", "Product USPs", "ESG Features", "Documentation"}
-    i = 0
-    while i < len(lines) - 1:
-        key = lines[i]
-        val = lines[i + 1]
-        if key in skip_headers:
-            i += 1
-            continue
-        if key == "Product USPs":
-            usp_parts = []
-            k = i + 1
-            while k < len(lines) and lines[k] not in {"Primary specifications", "ESG Features", "Documentation"}:
-                usp_parts.append(lines[k])
-                k += 1
-            usp = _clean(" ".join(usp_parts))
-            if usp:
-                specs.append(("Product USPs", usp))
-            i = k
-            continue
-        if key == "Primary specifications":
-            k = i + 1
-            while k < len(lines):
-                line = lines[k]
-                parts = re.split(r"\s{2,}|\t", line)
-                parts = [p.strip() for p in parts if p.strip()]
-                if len(parts) >= 2:
-                    if len(parts) % 2 == 0:
-                        for p_i in range(0, len(parts), 2):
-                            specs.append((parts[p_i], parts[p_i + 1]))
-                    else:
-                        specs.append((parts[0], _clean(" ".join(parts[1:]))))
-                k += 1
-            break
-        if re.search(r"[A-Za-z]", key) and val not in skip_headers:
-            specs.append((key, val))
-            i += 2
-            continue
-        i += 1
-
-    # dedupe keys
-    out: List[Tuple[str, str]] = []
-    seen = set()
-    for k, v in specs:
-        ks = _clean(k)
-        vs = _clean(v)
-        if not ks or not vs:
-            continue
-        if ks in seen:
-            continue
-        seen.add(ks)
-        out.append((ks, vs))
-
-    return desc, out
-
-
-def _get_product_details_text(driver: WebDriver) -> str:
-    _click_by_text(driver, ["Product details", "Product Details", "Details"], timeout=4)
-    _wait_dom_stable(0.8)
-
-    try:
-        heading = driver.find_element(By.XPATH, "//*[normalize-space()='Product details' or normalize-space()='Product Details']")
-        parent = heading.find_element(By.XPATH, "./ancestor::*[self::section or self::div][1]")
-        txt = parent.text or ""
-        if txt and len(txt) > 50:
-            return txt
-    except Exception:
-        pass
-
-    try:
-        panels = driver.find_elements(By.CSS_SELECTOR, "[role='tabpanel'], .tab-content, .tabs-content")
-        for p in panels:
+    def _dismiss_cookie_banner(self):
+        if not self.driver:
+            return
+        for sel in [
+            "#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll",
+            "#CybotCookiebotDialogBodyButtonAccept",
+        ]:
             try:
-                txt = p.text or ""
-                if "Description" in txt and len(txt) > 80:
-                    return txt
-            except Exception:
+                btn = self.driver.find_element(
+                    By.CSS_SELECTOR, sel
+                )
+                if btn.is_displayed():
+                    self.driver.execute_script(
+                        "arguments[0].click();", btn
+                    )
+                    time.sleep(2)
+                    return
+            except NoSuchElementException:
                 continue
-    except Exception:
-        pass
-
-    try:
-        return driver.find_element(By.TAG_NAME, "body").text or ""
-    except Exception:
-        return ""
-
-
-# -----------------------------
-# Data model
-# -----------------------------
-@dataclass
-class XDProduct:
-    url: str
-    title: str
-    sku: str
-    price_eur: Optional[float]
-    description: str
-    specs: List[Tuple[str, str]]
-    colors: List[str]
-    images: List[str]
-
-
-class XDConnectsScraper:
-    def __init__(self, driver: WebDriver, base_url: str = "https://www.xdconnects.com"):
-        self.driver = driver
-        self.base_url = base_url.rstrip("/")
-
-    def login(self, username: str, password: str) -> bool:
-        _log("🔐 XD: Mă conectez...")
         try:
-            self.driver.get(self.base_url + "/en-gb/login")
-            WebDriverWait(self.driver, 12).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+            self.driver.execute_script(
+                "var s=['#CybotCookiebotDialog',"
+                "'#CybotCookiebotDialogBodyUnderlay'];"
+                "s.forEach(function(x){"
+                "document.querySelectorAll(x).forEach("
+                "function(e){e.remove();});"
+                "});"
+                "document.body.style.overflow='auto';"
+            )
         except Exception:
             pass
+
+    def _login_if_needed(self):
+        if self._logged_in:
+            return
         try:
-            email_in = WebDriverWait(self.driver, 10).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='email'], input[name*='email'], input#email"))
+            xd_user = st.secrets.get("SOURCES", {}).get(
+                "XD_USER", ""
             )
-            pass_in = self.driver.find_element(By.CSS_SELECTOR, "input[type='password'], input[name*='pass'], input#password")
-            email_in.clear(); email_in.send_keys(username)
-            pass_in.clear(); pass_in.send_keys(password)
-
-            btns = self.driver.find_elements(By.CSS_SELECTOR, "button[type='submit'], button")
-            clicked = False
-            for b in btns:
-                txt = (b.text or "").lower()
-                if "login" in txt or "sign in" in txt or b.get_attribute("type") == "submit":
-                    if _safe_click(self.driver, b):
-                        clicked = True
-                        break
-            if not clicked:
-                pass_in.submit()
-
-            WebDriverWait(self.driver, 12).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-            _wait_dom_stable(1.0)
-            _log("✅ XD: Login reușit!")
-            return True
+            xd_pass = st.secrets.get("SOURCES", {}).get(
+                "XD_PASS", ""
+            )
+            if not xd_user or not xd_pass:
+                return
+            self._init_driver()
+            if not self.driver:
+                return
+            st.info("🔐 XD: Mă conectez...")
+            self.driver.get(
+                self.base_url + "/en-gb/profile/login"
+            )
+            time.sleep(5)
+            self._dismiss_cookie_banner()
+            time.sleep(1)
+            for sel in [
+                "input[type='email'][name='email']",
+                "input[name='email']",
+                "input[type='email']",
+            ]:
+                try:
+                    for f in self.driver.find_elements(
+                        By.CSS_SELECTOR, sel
+                    ):
+                        if f.is_displayed() and f.is_enabled():
+                            f.clear()
+                            f.send_keys(xd_user)
+                            break
+                    else:
+                        continue
+                    break
+                except Exception:
+                    continue
+            for f in self.driver.find_elements(
+                By.CSS_SELECTOR, "input[type='password']"
+            ):
+                if f.is_displayed() and f.is_enabled():
+                    f.clear()
+                    f.send_keys(xd_pass)
+                    break
+            self._dismiss_cookie_banner()
+            for sel in [
+                "form button[type='submit']",
+                "button[type='submit']",
+            ]:
+                try:
+                    for btn in self.driver.find_elements(
+                        By.CSS_SELECTOR, sel
+                    ):
+                        if btn.is_displayed():
+                            self.driver.execute_script(
+                                "arguments[0].click();", btn
+                            )
+                            break
+                    break
+                except Exception:
+                    continue
+            time.sleep(6)
+            self._logged_in = True
+            st.success("✅ XD: Login reușit!")
         except Exception as e:
-            _log(f"⚠️ XD: Login posibil nereușit / deja logat. Detalii: {e}")
-            return False
+            st.warning(f"⚠️ XD login: {str(e)[:100]}")
+            self._logged_in = True
 
-    def scrape_product(self, url: str) -> XDProduct:
-        _log(f"📦 XD v5.0: {url[:80]}...")
-        self.driver.get(url)
-        WebDriverWait(self.driver, 15).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-        _wait_dom_stable(1.2)
-
+    def scrape(self, url: str) -> dict | None:
         try:
-            raw_text = self.driver.find_element(By.TAG_NAME, "body").text or ""
-        except Exception:
-            raw_text = ""
+            self._login_if_needed()
+            self._init_driver()
+            if not self.driver:
+                return None
 
-        # title
-        title = ""
-        for sel in ["h1", "h1 span", "h1.product-title"]:
+            st.info(f"📦 XD v5.0: {url[:70]}...")
+            self.driver.get(url)
+            time.sleep(7)
+            self._dismiss_cookie_banner()
+            time.sleep(2)
+
+            # Scroll
+            for frac in ['0.3', '0.5', '0.8', '1', '0']:
+                self.driver.execute_script(
+                    "window.scrollTo(0,"
+                    "document.body.scrollHeight*"
+                    + frac + ");"
+                )
+                time.sleep(0.8)
+
+            # Click tab-uri
             try:
-                title = _clean(self.driver.find_element(By.CSS_SELECTOR, sel).text)
-                if title:
-                    break
+                tabs = self.driver.find_elements(
+                    By.CSS_SELECTOR,
+                    "[role='tab'], .nav-tabs a, "
+                    "[class*='tab'] a, "
+                    "[class*='tab'] button"
+                )
+                for tab in tabs:
+                    try:
+                        txt = tab.text.lower().strip()
+                        if any(
+                            kw in txt
+                            for kw in [
+                                'descri', 'specifi',
+                                'detail', 'feature',
+                            ]
+                        ):
+                            self.driver.execute_script(
+                                "arguments[0].click();", tab
+                            )
+                            time.sleep(1)
+                    except Exception:
+                        continue
             except Exception:
-                continue
-        if not title and raw_text:
-            title = _clean(raw_text.splitlines()[0])
+                pass
 
-        # sku
-        sku = ""
-        m = re.search(r"Item no\.\s*([A-Z0-9\.]+)", raw_text)
-        if m:
-            sku = m.group(1).strip()
+            # ═══ SCREENSHOT DEBUG ═══
+            try:
+                ss = self.driver.get_screenshot_as_png()
+                st.image(ss, caption="XD pagina produs", width=700)
+            except Exception:
+                pass
 
-        # price
-        price_eur: Optional[float] = None
-        m = re.search(r"Price\s*€\s*([0-9\.,]+)", raw_text)
-        if m:
-            price_eur = _as_float_price(m.group(1))
-        if price_eur is None:
-            m = re.search(r"€\s*([0-9\.,]+)", raw_text)
-            if m:
-                price_eur = _as_float_price(m.group(1))
+            page_source = self.driver.page_source
 
-        # details
-        details_text = _get_product_details_text(self.driver)
-        description, specs = _parse_details_text(details_text)
+            # ═══ DEBUG: primul 2000 caractere text vizibil ═══
+            try:
+                visible_text = self.driver.execute_script(
+                    "return document.body.innerText"
+                    ".substring(0, 2000);"
+                )
+                st.text_area(
+                    "DEBUG: Text vizibil pe pagină",
+                    visible_text,
+                    height=200
+                )
+            except Exception:
+                pass
 
-        if not description:
-            m = re.search(r"Description\s+(.+?)(?:Product USPs|Primary specifications|ESG Features|Documentation|$)", raw_text, flags=re.S)
-            if m:
-                description = _clean(m.group(1))
+            soup = BeautifulSoup(page_source, 'html.parser')
 
-        # colors
-        colors: List[str] = []
-        colors = _dedupe_preserve(colors)
+            # ═══ NUME ═══
+            name = ""
+            h1 = soup.select_one('h1')
+            if h1:
+                name = h1.get_text(strip=True)
+            if not name:
+                name = "Produs XD Connects"
 
-        if not colors:
-            specs_dict = _specs_to_dict(specs)
-            for key in ["Colour", "Color", "Culoare"]:
-                if key in specs_dict and specs_dict[key]:
-                    colors = [specs_dict[key].strip()]
-                    break
+            # ═══ SKU ═══
+            sku = ""
+            im = re.search(
+                r'Item\s*no\.?\s*:?\s*([A-Z0-9.]+)',
+                page_source, re.IGNORECASE
+            )
+            if im:
+                sku = im.group(1).upper()
+            if not sku:
+                sm = re.search(
+                    r'([pP]\d{3}\.\d{2,3})', url
+                )
+                if sm:
+                    sku = sm.group(1).upper()
 
-        if not colors:
-            c = _extract_colour_from_text(raw_text)
-            if c:
-                colors = [c]
+            # ═══ PREȚ (EUR + RON) ═══
+            price = 0.0
+            currency = 'EUR'
+            try:
+                price_info = self.driver.execute_script("""
+                    var body = document.body.innerText;
+                    var result = {price: '', currency: ''};
 
-        colors = _dedupe_preserve(colors)
+                    // RON
+                    var ronMatch = body.match(
+                        /(?:From\\s+)?(\\d{1,6}[.,]\\d{2})\\s*RON/i
+                    );
+                    if (ronMatch) {
+                        result.price = ronMatch[1];
+                        result.currency = 'RON';
+                        return result;
+                    }
 
-        images = _extract_images(self.driver, self.base_url)
+                    // EUR cu simbol €
+                    var eurMatch = body.match(
+                        /(?:From\\s+)?[€]\\s*(\\d{1,6}[.,]\\d{2})/
+                    );
+                    if (eurMatch) {
+                        result.price = eurMatch[1];
+                        result.currency = 'EUR';
+                        return result;
+                    }
 
-        _log(f"💰 PREȚ: {price_eur} EUR")
-        _log(f"📝 DESC: {len(description or '')} car")
-        _log(f"📋 SPECS: {len(specs)} = {specs[:3] if specs else []}")
-        _log(f"🎨 CULORI: {len(colors)} = {colors}")
-        try:
-            _log(f"📸 Total img pe pagină: {len(self.driver.find_elements(By.CSS_SELECTOR, 'img'))}, extrase: {len(images)}")
-        except Exception:
-            _log(f"📸 extrase: {len(images)}")
-        if images:
-            _log(f"📸 IMG: {len(images)} ex: {images[0][:90]}...")
+                    // EUR text
+                    var eurMatch2 = body.match(
+                        /(?:From\\s+)?(\\d{1,6}[.,]\\d{2})\\s*EUR/i
+                    );
+                    if (eurMatch2) {
+                        result.price = eurMatch2[1];
+                        result.currency = 'EUR';
+                        return result;
+                    }
 
-        return XDProduct(
-            url=url,
-            title=title,
-            sku=sku,
-            price_eur=price_eur,
-            description=description,
-            specs=specs,
-            colors=colors,
-            images=images,
-        )
-"""
+                    // Orice preț cu .XX sau ,XX
+                    var anyMatch = body.match(
+                        /(?:From\\s+)?(\\d{1,6}[.,]\\d{2})/
+                    );
+                    if (anyMatch) {
+                        result.price = anyMatch[1];
+                        result.currency = 'EUR';
+                        return result;
+                    }
 
-with zipfile.ZipFile(out_zip, 'w', zipfile.ZIP_DEFLATED) as z:
-    z.writestr(py_path_in_zip, code)
+                    return result;
+                """)
+                if price_info:
+                    price_str = price_info.get('price', '')
+                    if price_str:
+                        price = clean_price(str(price_str))
+                    currency = price_info.get(
+                        'currency', 'EUR'
+                    )
+            except Exception as e:
+                st.warning(f"⚠️ PREȚ err: {str(e)[:50]}")
 
-out_zip, os.path.getsize(out_zip)
+            if price <= 0:
+                for pattern in [
+                    r'(\d{1,6}[.,]\d{2})\s*RON',
+                    r'[€]\s*(\d{1,6}[.,]\d{2})',
+                    r'(\d{1,6}[.,]\d{2})\s*EUR',
+                ]:
+                    pm = re.search(
+                        pattern, page_source, re.IGNORECASE
+                    )
+                    if pm:
+                        price = clean_price(pm.group(1))
+                        if 'RON' in pattern:
+                            currency = 'RON'
+                        else:
+                            currency = 'EUR'
+                        break
+
+            st.info(f"💰 PREȚ: {price} {currency}")
+
+            # ═══ DESCRIERE ═══
+            description = ""
+            try:
+                dr = self.driver.execute_script("""
+                    var result = '';
+                    var sels = [
+                        '[class*="description"]',
+                        '[class*="detail-desc"]',
+                        '#description',
+                        '.tab-pane',
+                        '[class*="product-info"]',
+                        '[class*="content"]',
+                        'article'
+                    ];
+                    for (var i = 0; i < sels.length; i++) {
+                        var els = document.querySelectorAll(
+                            sels[i]
+                        );
+                        for (var j = 0; j < els.length; j++) {
+                            var t = els[j].innerText.trim();
+                            if (t.length > 30 &&
+                                t.length < 5000 &&
+                                t.length > result.length &&
+                                t.indexOf('Accept') === -1 &&
+                                t.indexOf('Cookie') === -1 &&
+                                t.indexOf('cookie') === -1) {
+                                result = t;
+                            }
+                        }
+                        if (result.length > 100) break;
+                    }
+                    if (result.length < 30) {
+                        var ps = document.querySelectorAll('p');
+                        var arr = [];
+                        for (var k = 0; k < ps.length; k++) {
+                            var pt = ps[k].innerText.trim();
+                            if (pt.length > 15 &&
+                                pt.length < 500 &&
+                                pt.indexOf('Cookie') === -1 &&
+                                pt.indexOf('cookie') === -1 &&
+                                pt.indexOf('Login') === -1) {
+                                arr.push(pt);
+                            }
+                        }
+                        if (arr.length > 0)
+                            result = arr.join(' | ');
+                    }
+                    return result;
+                """)
+                if dr and len(str(dr)) > 15:
+                    raw = str(dr).strip()
+                    lines = raw.split('\n')
+                    clean = []
+                    for line in lines:
+                        line = line.strip()
+                        if (
+                            line and len(line) > 5
+                            and 'cookie' not in line.lower()
+                            and 'accept' not in line.lower()
+                            and 'login' not in line.lower()
+                            and 'ORDER' not in line
+                            and 'Add to' not in line
+                            and 'Adăugați' not in line
+                        ):
+                            clean.append(line)
+                    if clean:
+                        description = (
+                            '<p>' +
+                            '</p><p>'.join(clean[:15]) +
+                            '</p>'
+                        )
+            except Exception as e:
+                st.warning(f"⚠️ DESC: {str(e)[:50]}")
+
+            if not description or len(description) < 30:
+                meta = soup.select_one(
+                    'meta[name="description"]'
+                )
+                if meta:
+                    mc = meta.get('content', '')
+                    if mc and len(mc) > 15:
+                        description = '<p>' + mc + '</p>'
+
+            st.info(f"📝 DESC: {len(description)} car")
+
+            # ═══ SPECIFICAȚII ═══
+            specifications = {}
+            try:
+                sp = self.driver.execute_script("""
+                    var specs = {};
+                    var tables = document.querySelectorAll(
+                        'table'
+                    );
+                    for (var t = 0; t < tables.length; t++) {
+                        var rows = tables[t]
+                            .querySelectorAll('tr');
+                        var isPrice = false;
+                        for (var r = 0;
+                             r < rows.length; r++) {
+                            var cells = rows[r]
+                                .querySelectorAll('td, th');
+                            if (cells.length >= 2) {
+                                var k = cells[0]
+                                    .innerText.trim();
+                                var v = cells[1]
+                                    .innerText.trim();
+                                // Skip price tables
+                                if (k === 'Quantity' ||
+                                    k === 'Printed*' ||
+                                    k === 'Plain' ||
+                                    v.indexOf('RON') > -1 ||
+                                    v.indexOf('EUR') > -1 ||
+                                    v.indexOf('€') > -1) {
+                                    isPrice = true;
+                                    continue;
+                                }
+                                if (!isPrice && k && v &&
+                                    k.length < 50 &&
+                                    v.length < 300) {
+                                    specs[k] = v;
+                                }
+                            }
+                        }
+                        if (Object.keys(specs).length > 0)
+                            break;
+                    }
+                    if (Object.keys(specs).length === 0) {
+                        var dts = document.querySelectorAll(
+                            'dt'
+                        );
+                        var dds = document.querySelectorAll(
+                            'dd'
+                        );
+                        var n = Math.min(
+                            dts.length, dds.length
+                        );
+                        for (var i = 0; i < n; i++) {
+                            var dk = dts[i].innerText.trim();
+                            var dv = dds[i].innerText.trim();
+                            if (dk && dv && dk.length < 50 &&
+                                dv.indexOf('€') === -1 &&
+                                dv.indexOf('RON') === -1) {
+                                specs[dk] = dv;
+                            }
+                        }
+                    }
+                    return specs;
+                """)
+                if sp and isinstance(sp, dict):
+                    specifications = sp
+            except Exception as e:
+                st.warning(f"⚠️ SPEC: {str(e)[:50]}")
+
+            # Fallback specs din bullet text
+            if not specifications:
+                bm = re.findall(
+                    r'([\w\s]+)\s*[•●]\s*',
+                    page_source
+                )
+                if bm and len(bm) >= 2:
+                    for i, item in enumerate(bm[:6]):
+                        item = item.strip()
+                        if (
+                            item and len(item) > 2
+                            and len(item) < 50
+                        ):
+                            specifications[
+                                f'Feature {i+1}'
+                            ] = item
+
+            st.info(
+                f"📋 SPECS: {len(specifications)} = "
+                f"{list(specifications.items())[:3]}"
+            )
+
+            # ═══ CULORI ═══
+            colors = []
+            color_variants = []
+            try:
+                cr = self.driver.execute_script("""
+                    var results = [];
+                    var links = document.querySelectorAll(
+                        'a[href*="variantId"]'
+                    );
+
+                    for (var i = 0; i < links.length; i++) {
+                        var el = links[i];
+                        var name = (
+                            el.getAttribute('title') ||
+                            el.getAttribute('aria-label') ||
+                            ''
+                        ).trim();
+
+                        var href =
+                            el.getAttribute('href') || '';
+                        var vm = href.match(
+                            /variantId=([A-Z0-9.]+)/i
+                        );
+                        var vid = vm ?
+                            vm[1].toUpperCase() : '';
+
+                        if (!name && vid) name = vid;
+
+                        var rect = el.getBoundingClientRect();
+
+                        // Swatch = element MIC (<100px)
+                        // cu background-color
+                        var isSwatch = (
+                            rect.width > 5 &&
+                            rect.width < 100 &&
+                            rect.height > 5 &&
+                            rect.height < 100
+                        );
+
+                        // Excludem orice text lung sau
+                        // cu cuvinte produse
+                        var nameLen = name.length;
+                        var isShort = nameLen > 0 && nameLen < 20;
+
+                        if (isSwatch && isShort) {
+                            var exists = false;
+                            for (var r = 0;
+                                 r < results.length; r++) {
+                                if (results[r].name === name) {
+                                    exists = true;
+                                    break;
+                                }
+                            }
+                            if (!exists) {
+                                results.push({
+                                    name: name,
+                                    href: href,
+                                    vid: vid
+                                });
+                            }
+                        }
+                    }
+                    return results;
+                """)
+                if cr:
+                    for item in cr:
+                        c = item.get('name', '').strip()
+                        if c and c not in colors:
+                            colors.append(c)
+                            color_variants.append({
+                                'name': c,
+                                'url': make_absolute_url(
+                                    item.get('href', ''),
+                                    self.base_url
+                                ),
+                                'image': '',
+                                'color_code': item.get(
+                                    'vid', ''
+                                ),
+                                'variant_id': item.get(
+                                    'vid', ''
+                                ),
+                            })
+            except Exception as e:
+                st.warning(f"⚠️ CULORI: {str(e)[:50]}")
+
+            
+            # Fallback culoare (XD nu expune mereu swatch-urile ca link-uri cu variantId)
+            text_for_color = ""
+            try:
+                text_for_color = visible_text  # primele ~2000 caractere
+            except Exception:
+                text_for_color = ""
+
+            if not text_for_color:
+                try:
+                    text_for_color = self.driver.execute_script(
+                        "return document.body.innerText.substring(0, 4000);"
+                    )
+                except Exception:
+                    text_for_color = ""
+
+            if not colors:
+                # 1) din specificatii
+                for k in ("Colour", "Color", "Culoare"):
+                    v = specifications.get(k)
+                    if v:
+                        colors = [str(v).strip()]
+                        break
+
+            if not colors:
+                # 2) din textul paginii (foarte robust)
+                detected = _extract_colour_from_text(text_for_color)
+                if detected:
+                    colors = [detected]
+
+            print("XD DEBUG detected_color =", colors[0] if colors else None)
+            print("XD DEBUG colors_final =", colors)
+st.info(f"🎨 CULORI: {len(colors)} = {colors}")
+
+            # ═══ IMAGINI ═══
+            images = []
+            try:
+                ir = self.driver.execute_script("""
+                    var results = [];
+
+                    // Metoda 1: img tags
+                    var imgs = document.querySelectorAll('img');
+                    for (var i = 0; i < imgs.length; i++) {
+                        var src =
+                            imgs[i].getAttribute('data-src') ||
+                            imgs[i].getAttribute('src') ||
+                            imgs[i].getAttribute('data-lazy') ||
+                            '';
+                        if (src.length < 10) continue;
+
+                        // Orice imagine mare de produs
+                        var isProduct = (
+                            src.indexOf('ProductImages') > -1 ||
+                            src.indexOf('product') > -1 ||
+                            src.indexOf('static.xd') > -1
+                        );
+                        var isBad = (
+                            src.indexOf('icon') > -1 ||
+                            src.indexOf('logo') > -1 ||
+                            src.indexOf('flag') > -1 ||
+                            src.indexOf('co2') > -1 ||
+                            src.indexOf('badge') > -1 ||
+                            src.indexOf('pixel') > -1 ||
+                            src.indexOf('svg') > -1 ||
+                            src.indexOf('data:') > -1
+                        );
+
+                        if (isProduct && !isBad) {
+                            var large = src
+                                .replace('/Small/', '/Large/')
+                                .replace('/Thumb/', '/Large/')
+                                .replace('/Medium/', '/Large/');
+                            if (results.indexOf(large) === -1) {
+                                results.push(large);
+                            }
+                        }
+                    }
+
+                    // Metoda 2: background-image
+                    if (results.length === 0) {
+                        var allEls = document.querySelectorAll(
+                            '[style*="background"]'
+                        );
+                        for (var j = 0;
+                             j < allEls.length; j++) {
+                            var style =
+                                allEls[j].getAttribute('style')
+                                || '';
+                            var bgMatch = style.match(
+                                /url\\(['"]?([^'"\\)]+)/
+                            );
+                            if (bgMatch) {
+                                var bgSrc = bgMatch[1];
+                                if (bgSrc.indexOf(
+                                        'ProductImages') > -1 ||
+                                    bgSrc.indexOf(
+                                        'static.xd') > -1) {
+                                    var lg = bgSrc
+                                        .replace(
+                                            '/Small/', '/Large/'
+                                        )
+                                        .replace(
+                                            '/Thumb/', '/Large/'
+                                        );
+                                    if (results.indexOf(
+                                            lg) === -1) {
+                                        results.push(lg);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Metoda 3: srcset
+                    if (results.length === 0) {
+                        var imgs2 = document.querySelectorAll(
+                            'img[srcset]'
+                        );
+                        for (var k = 0;
+                             k < imgs2.length; k++) {
+                            var srcset =
+                                imgs2[k].getAttribute('srcset')
+                                || '';
+                            var parts = srcset.split(',');
+                            for (var p = parts.length - 1;
+                                 p >= 0; p--) {
+                                var u = parts[p].trim()
+                                    .split(' ')[0];
+                                if (u &&
+                                    u.indexOf('Product') > -1) {
+                                    if (results.indexOf(
+                                            u) === -1) {
+                                        results.push(u);
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    // Debug: raportăm câte img am găsit total
+                    var totalImgs = document
+                        .querySelectorAll('img').length;
+                    if (results.length === 0) {
+                        // Ultima încercare: ORICE imagine
+                        for (var z = 0; z < imgs.length; z++) {
+                            var s =
+                                imgs[z].getAttribute('src') ||
+                                '';
+                            var rect = imgs[z]
+                                .getBoundingClientRect();
+                            if (s.length > 10 &&
+                                rect.width > 50 &&
+                                rect.height > 50 &&
+                                s.indexOf('data:') === -1 &&
+                                s.indexOf('svg') === -1) {
+                                results.push(s);
+                                if (results.length >= 10)
+                                    break;
+                            }
+                        }
+                    }
+
+                    return {
+                        images: results,
+                        totalImgs: totalImgs
+                    };
+                """)
+                if ir:
+                    images = ir.get('images', [])
+                    total_imgs = ir.get('totalImgs', 0)
+                    st.info(
+                        f"📸 Total img pe pagină: "
+                        f"{total_imgs}, "
+                        f"extrase: {len(images)}"
+                    )
+            except Exception as e:
+                st.warning(f"⚠️ IMG: {str(e)[:50]}")
+
+            st.info(
+                f"📸 IMG: {len(images)}"
+                + (
+                    f" ex: {images[0][:60]}..."
+                    if images else " GOLE"
+                )
+            )
+
+            # ═══ BUILD ═══
+            product = self._build_product(
+                name=name,
+                sku=sku,
+                price=price,
+                description=description,
+                images=images,
+                colors=colors,
+                specifications=specifications,
+                source_url=url,
+                source_site=self.name,
+                category='Rucsacuri Anti-Furt',
+                currency=currency,
+            )
+            product['color_variants'] = color_variants
+            product['variant_images'] = {}
+
+            st.success(
+                f"✅ {name[:30]} | P:{price}{currency} | "
+                f"D:{len(description)} | "
+                f"S:{len(specifications)} | "
+                f"C:{len(colors)} | I:{len(images)}"
+            )
+
+            return product
+
+        except Exception as e:
+            st.error(f"❌ XD: {str(e)}")
+            return None
