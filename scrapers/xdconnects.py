@@ -1,8 +1,11 @@
 # scrapers/xdconnects.py
-# VERSIUNE 4.0 - fix regex JS, culori, imagini
+# VERSIUNE 5.0 - fix EUR, imagini, culori, screenshot debug
 """
-Scraper XD Connects v4.0
-Fix: regex JS, culori Images, imagini 0
+Scraper XD Connects v5.0
+- Preț: EUR și RON
+- Imagini: src direct + background-image
+- Culori: swatch mic
+- Screenshot debug
 """
 import re
 import time
@@ -49,8 +52,8 @@ class XDConnectsScraper(BaseScraper):
                 "var s=['#CybotCookiebotDialog',"
                 "'#CybotCookiebotDialogBodyUnderlay'];"
                 "s.forEach(function(x){"
-                "document.querySelectorAll(x)"
-                ".forEach(function(e){e.remove();});"
+                "document.querySelectorAll(x).forEach("
+                "function(e){e.remove();});"
                 "});"
                 "document.body.style.overflow='auto';"
             )
@@ -69,11 +72,9 @@ class XDConnectsScraper(BaseScraper):
             )
             if not xd_user or not xd_pass:
                 return
-
             self._init_driver()
             if not self.driver:
                 return
-
             st.info("🔐 XD: Mă conectez...")
             self.driver.get(
                 self.base_url + "/en-gb/profile/login"
@@ -81,7 +82,6 @@ class XDConnectsScraper(BaseScraper):
             time.sleep(5)
             self._dismiss_cookie_banner()
             time.sleep(1)
-
             for sel in [
                 "input[type='email'][name='email']",
                 "input[name='email']",
@@ -100,7 +100,6 @@ class XDConnectsScraper(BaseScraper):
                     break
                 except Exception:
                     continue
-
             for f in self.driver.find_elements(
                 By.CSS_SELECTOR, "input[type='password']"
             ):
@@ -108,7 +107,6 @@ class XDConnectsScraper(BaseScraper):
                     f.clear()
                     f.send_keys(xd_pass)
                     break
-
             self._dismiss_cookie_banner()
             for sel in [
                 "form button[type='submit']",
@@ -126,7 +124,6 @@ class XDConnectsScraper(BaseScraper):
                     break
                 except Exception:
                     continue
-
             time.sleep(6)
             self._logged_in = True
             st.success("✅ XD: Login reușit!")
@@ -141,17 +138,17 @@ class XDConnectsScraper(BaseScraper):
             if not self.driver:
                 return None
 
-            st.info(f"📦 XD v4.0: {url[:70]}...")
+            st.info(f"📦 XD v5.0: {url[:70]}...")
             self.driver.get(url)
-            time.sleep(6)
+            time.sleep(7)
             self._dismiss_cookie_banner()
             time.sleep(2)
 
             # Scroll
             for frac in ['0.3', '0.5', '0.8', '1', '0']:
                 self.driver.execute_script(
-                    "window.scrollTo(0, "
-                    "document.body.scrollHeight * "
+                    "window.scrollTo(0,"
+                    "document.body.scrollHeight*"
                     + frac + ");"
                 )
                 time.sleep(0.8)
@@ -161,7 +158,8 @@ class XDConnectsScraper(BaseScraper):
                 tabs = self.driver.find_elements(
                     By.CSS_SELECTOR,
                     "[role='tab'], .nav-tabs a, "
-                    "[class*='tab'] a, [class*='tab'] button"
+                    "[class*='tab'] a, "
+                    "[class*='tab'] button"
                 )
                 for tab in tabs:
                     try:
@@ -182,7 +180,29 @@ class XDConnectsScraper(BaseScraper):
             except Exception:
                 pass
 
+            # ═══ SCREENSHOT DEBUG ═══
+            try:
+                ss = self.driver.get_screenshot_as_png()
+                st.image(ss, caption="XD pagina produs", width=700)
+            except Exception:
+                pass
+
             page_source = self.driver.page_source
+
+            # ═══ DEBUG: primul 2000 caractere text vizibil ═══
+            try:
+                visible_text = self.driver.execute_script(
+                    "return document.body.innerText"
+                    ".substring(0, 2000);"
+                )
+                st.text_area(
+                    "DEBUG: Text vizibil pe pagină",
+                    visible_text,
+                    height=200
+                )
+            except Exception:
+                pass
+
             soup = BeautifulSoup(page_source, 'html.parser')
 
             # ═══ NUME ═══
@@ -192,7 +212,6 @@ class XDConnectsScraper(BaseScraper):
                 name = h1.get_text(strip=True)
             if not name:
                 name = "Produs XD Connects"
-            st.info(f"📋 NUME: {name}")
 
             # ═══ SKU ═══
             sku = ""
@@ -209,35 +228,84 @@ class XDConnectsScraper(BaseScraper):
                 if sm:
                     sku = sm.group(1).upper()
 
-            # ═══ PREȚ ═══
+            # ═══ PREȚ (EUR + RON) ═══
             price = 0.0
+            currency = 'EUR'
             try:
-                pr = self.driver.execute_script(
-                    "var b=document.body.innerText;"
-                    "var m=b.match("
-                    "/(?:From\\\\s+)?(\\\\d{1,5}[.,]\\\\d{2})"
-                    "\\\\s*RON/i);"
-                    "if(m)return m[1];"
-                    "var e=document.querySelectorAll("
-                    "'[class*=\"price\"]');"
-                    "for(var i=0;i<e.length;i++){"
-                    "var t=e[i].innerText;"
-                    "var p=t.match(/(\\\\d{1,5}[.,]\\\\d{2})/);"
-                    "if(p)return p[1];}"
-                    "return '';"
-                )
-                if pr:
-                    price = clean_price(str(pr))
-            except Exception:
-                pass
+                price_info = self.driver.execute_script("""
+                    var body = document.body.innerText;
+                    var result = {price: '', currency: ''};
+
+                    // RON
+                    var ronMatch = body.match(
+                        /(?:From\\s+)?(\\d{1,6}[.,]\\d{2})\\s*RON/i
+                    );
+                    if (ronMatch) {
+                        result.price = ronMatch[1];
+                        result.currency = 'RON';
+                        return result;
+                    }
+
+                    // EUR cu simbol €
+                    var eurMatch = body.match(
+                        /(?:From\\s+)?[€]\\s*(\\d{1,6}[.,]\\d{2})/
+                    );
+                    if (eurMatch) {
+                        result.price = eurMatch[1];
+                        result.currency = 'EUR';
+                        return result;
+                    }
+
+                    // EUR text
+                    var eurMatch2 = body.match(
+                        /(?:From\\s+)?(\\d{1,6}[.,]\\d{2})\\s*EUR/i
+                    );
+                    if (eurMatch2) {
+                        result.price = eurMatch2[1];
+                        result.currency = 'EUR';
+                        return result;
+                    }
+
+                    // Orice preț cu .XX sau ,XX
+                    var anyMatch = body.match(
+                        /(?:From\\s+)?(\\d{1,6}[.,]\\d{2})/
+                    );
+                    if (anyMatch) {
+                        result.price = anyMatch[1];
+                        result.currency = 'EUR';
+                        return result;
+                    }
+
+                    return result;
+                """)
+                if price_info:
+                    price_str = price_info.get('price', '')
+                    if price_str:
+                        price = clean_price(str(price_str))
+                    currency = price_info.get(
+                        'currency', 'EUR'
+                    )
+            except Exception as e:
+                st.warning(f"⚠️ PREȚ err: {str(e)[:50]}")
+
             if price <= 0:
-                pm = re.search(
-                    r'(\d{1,5}[.,]\d{2})\s*RON',
-                    page_source
-                )
-                if pm:
-                    price = clean_price(pm.group(1))
-            st.info(f"💰 PREȚ: {price} RON")
+                for pattern in [
+                    r'(\d{1,6}[.,]\d{2})\s*RON',
+                    r'[€]\s*(\d{1,6}[.,]\d{2})',
+                    r'(\d{1,6}[.,]\d{2})\s*EUR',
+                ]:
+                    pm = re.search(
+                        pattern, page_source, re.IGNORECASE
+                    )
+                    if pm:
+                        price = clean_price(pm.group(1))
+                        if 'RON' in pattern:
+                            currency = 'RON'
+                        else:
+                            currency = 'EUR'
+                        break
+
+            st.info(f"💰 PREȚ: {price} {currency}")
 
             # ═══ DESCRIERE ═══
             description = ""
@@ -248,8 +316,10 @@ class XDConnectsScraper(BaseScraper):
                         '[class*="description"]',
                         '[class*="detail-desc"]',
                         '#description',
-                        '.tab-pane.active',
-                        '[class*="product-info"]'
+                        '.tab-pane',
+                        '[class*="product-info"]',
+                        '[class*="content"]',
+                        'article'
                     ];
                     for (var i = 0; i < sels.length; i++) {
                         var els = document.querySelectorAll(
@@ -261,27 +331,28 @@ class XDConnectsScraper(BaseScraper):
                                 t.length < 5000 &&
                                 t.length > result.length &&
                                 t.indexOf('Accept') === -1 &&
-                                t.indexOf('Cookie') === -1) {
+                                t.indexOf('Cookie') === -1 &&
+                                t.indexOf('cookie') === -1) {
                                 result = t;
                             }
                         }
-                        if (result.length > 80) break;
+                        if (result.length > 100) break;
                     }
                     if (result.length < 30) {
                         var ps = document.querySelectorAll('p');
                         var arr = [];
                         for (var k = 0; k < ps.length; k++) {
                             var pt = ps[k].innerText.trim();
-                            if (pt.length > 20 &&
+                            if (pt.length > 15 &&
                                 pt.length < 500 &&
                                 pt.indexOf('Cookie') === -1 &&
+                                pt.indexOf('cookie') === -1 &&
                                 pt.indexOf('Login') === -1) {
                                 arr.push(pt);
                             }
                         }
-                        if (arr.length > 0) {
-                            result = arr.join(' ');
-                        }
+                        if (arr.length > 0)
+                            result = arr.join(' | ');
                     }
                     return result;
                 """)
@@ -304,11 +375,11 @@ class XDConnectsScraper(BaseScraper):
                     if clean:
                         description = (
                             '<p>' +
-                            '</p><p>'.join(clean[:10]) +
+                            '</p><p>'.join(clean[:15]) +
                             '</p>'
                         )
             except Exception as e:
-                st.warning(f"⚠️ DESC err: {str(e)[:50]}")
+                st.warning(f"⚠️ DESC: {str(e)[:50]}")
 
             if not description or len(description) < 30:
                 meta = soup.select_one(
@@ -318,18 +389,6 @@ class XDConnectsScraper(BaseScraper):
                     mc = meta.get('content', '')
                     if mc and len(mc) > 15:
                         description = '<p>' + mc + '</p>'
-
-            if not description or len(description) < 30:
-                tm = re.search(
-                    r'((?:rPET|PVC|recycled|anti.?theft|'
-                    r'volume|laptop|RFID|water)'
-                    r'[^<\n]{10,500})',
-                    page_source, re.IGNORECASE
-                )
-                if tm:
-                    description = (
-                        '<p>' + tm.group(1).strip() + '</p>'
-                    )
 
             st.info(f"📝 DESC: {len(description)} car")
 
@@ -342,10 +401,11 @@ class XDConnectsScraper(BaseScraper):
                         'table'
                     );
                     for (var t = 0; t < tables.length; t++) {
-                        var rows = tables[t].querySelectorAll(
-                            'tr'
-                        );
-                        for (var r = 0; r < rows.length; r++) {
+                        var rows = tables[t]
+                            .querySelectorAll('tr');
+                        var isPrice = false;
+                        for (var r = 0;
+                             r < rows.length; r++) {
                             var cells = rows[r]
                                 .querySelectorAll('td, th');
                             if (cells.length >= 2) {
@@ -353,12 +413,19 @@ class XDConnectsScraper(BaseScraper):
                                     .innerText.trim();
                                 var v = cells[1]
                                     .innerText.trim();
-                                if (k && v &&
+                                // Skip price tables
+                                if (k === 'Quantity' ||
+                                    k === 'Printed*' ||
+                                    k === 'Plain' ||
+                                    v.indexOf('RON') > -1 ||
+                                    v.indexOf('EUR') > -1 ||
+                                    v.indexOf('€') > -1) {
+                                    isPrice = true;
+                                    continue;
+                                }
+                                if (!isPrice && k && v &&
                                     k.length < 50 &&
-                                    v.length < 300 &&
-                                    k !== 'Quantity' &&
-                                    k !== 'Printed*' &&
-                                    k.indexOf('RON') === -1) {
+                                    v.length < 300) {
                                     specs[k] = v;
                                 }
                             }
@@ -379,7 +446,9 @@ class XDConnectsScraper(BaseScraper):
                         for (var i = 0; i < n; i++) {
                             var dk = dts[i].innerText.trim();
                             var dv = dds[i].innerText.trim();
-                            if (dk && dv && dk.length < 50) {
+                            if (dk && dv && dk.length < 50 &&
+                                dv.indexOf('€') === -1 &&
+                                dv.indexOf('RON') === -1) {
                                 specs[dk] = dv;
                             }
                         }
@@ -389,31 +458,28 @@ class XDConnectsScraper(BaseScraper):
                 if sp and isinstance(sp, dict):
                     specifications = sp
             except Exception as e:
-                st.warning(f"⚠️ SPEC err: {str(e)[:50]}")
+                st.warning(f"⚠️ SPEC: {str(e)[:50]}")
 
-            # Fallback: regex pe bullet text
+            # Fallback specs din bullet text
             if not specifications:
-                bm = re.search(
-                    r'((?:rPET|PVC|recycled|anti.?theft|'
-                    r'polyester)\s*'
-                    + r'[\u2022\u25CF•●]'
-                    + r'\s*[^\n<]{10,300})',
-                    page_source, re.IGNORECASE
+                bm = re.findall(
+                    r'([\w\s]+)\s*[•●]\s*',
+                    page_source
                 )
-                if bm:
-                    parts = re.split(
-                        r'[\u2022\u25CF•●]', bm.group(1)
-                    )
-                    for i, p in enumerate(parts):
-                        p = p.strip()
-                        if p and len(p) > 2:
+                if bm and len(bm) >= 2:
+                    for i, item in enumerate(bm[:6]):
+                        item = item.strip()
+                        if (
+                            item and len(item) > 2
+                            and len(item) < 50
+                        ):
                             specifications[
-                                'Feature ' + str(i+1)
-                            ] = p
+                                f'Feature {i+1}'
+                            ] = item
 
             st.info(
-                f"📋 SPECS: {len(specifications)} "
-                f"= {list(specifications.items())[:3]}"
+                f"📋 SPECS: {len(specifications)} = "
+                f"{list(specifications.items())[:3]}"
             )
 
             # ═══ CULORI ═══
@@ -426,7 +492,8 @@ class XDConnectsScraper(BaseScraper):
                         'a[href*="variantId"]'
                     );
 
-                    links.forEach(function(el) {
+                    for (var i = 0; i < links.length; i++) {
+                        var el = links[i];
                         var name = (
                             el.getAttribute('title') ||
                             el.getAttribute('aria-label') ||
@@ -443,47 +510,23 @@ class XDConnectsScraper(BaseScraper):
 
                         if (!name && vid) name = vid;
 
-                        // Dimensiunea elementului
                         var rect = el.getBoundingClientRect();
-                        var isSmall = (
-                            rect.width < 80 &&
-                            rect.height < 80 &&
+
+                        // Swatch = element MIC (<100px)
+                        // cu background-color
+                        var isSwatch = (
                             rect.width > 5 &&
-                            rect.height > 5
+                            rect.width < 100 &&
+                            rect.height > 5 &&
+                            rect.height < 100
                         );
 
-                        // Filtrare strictă
-                        var bad = [
-                            'Add', 'add', 'cart', 'Cart',
-                            'ORDER', 'order', 'Images',
-                            'images', 'coș', 'Adăugați',
-                            'rucsac', 'Rucsac', 'Bobby',
-                            'bobby', 'backpack', 'Backpack',
-                            'Hero', 'hero', 'Small', 'small',
-                            'Anti', 'anti', 'theft', 'MORE',
-                            'more', 'MEDIA', 'media',
-                            'Download', 'download'
-                        ];
+                        // Excludem orice text lung sau
+                        // cu cuvinte produse
+                        var nameLen = name.length;
+                        var isShort = nameLen > 0 && nameLen < 20;
 
-                        var isBad = false;
-                        for (var b = 0; b < bad.length; b++) {
-                            if (name.indexOf(bad[b]) !== -1) {
-                                isBad = true;
-                                break;
-                            }
-                        }
-
-                        // Acceptăm doar elementele mici
-                        // (swatches de culoare) SAU cu nume
-                        // scurt de culoare
-                        var isColor = (
-                            !isBad &&
-                            name.length > 0 &&
-                            name.length < 25 &&
-                            (isSmall || name.length < 15)
-                        );
-
-                        if (isColor) {
+                        if (isSwatch && isShort) {
                             var exists = false;
                             for (var r = 0;
                                  r < results.length; r++) {
@@ -496,17 +539,13 @@ class XDConnectsScraper(BaseScraper):
                                 results.push({
                                     name: name,
                                     href: href,
-                                    vid: vid,
-                                    w: rect.width,
-                                    h: rect.height
+                                    vid: vid
                                 });
                             }
                         }
-                    });
-
+                    }
                     return results;
                 """)
-
                 if cr:
                     for item in cr:
                         c = item.get('name', '').strip()
@@ -527,117 +566,162 @@ class XDConnectsScraper(BaseScraper):
                                 ),
                             })
             except Exception as e:
-                st.warning(
-                    f"⚠️ CULORI err: {str(e)[:50]}"
-                )
+                st.warning(f"⚠️ CULORI: {str(e)[:50]}")
 
-            st.info(
-                f"🎨 CULORI: {len(colors)} = {colors[:6]}"
-            )
+            st.info(f"🎨 CULORI: {len(colors)} = {colors}")
 
             # ═══ IMAGINI ═══
             images = []
             try:
                 ir = self.driver.execute_script("""
                     var results = [];
-                    var imgs = document.querySelectorAll(
-                        'img'
-                    );
+
+                    // Metoda 1: img tags
+                    var imgs = document.querySelectorAll('img');
                     for (var i = 0; i < imgs.length; i++) {
                         var src =
                             imgs[i].getAttribute('data-src') ||
-                            imgs[i].getAttribute('src') || '';
+                            imgs[i].getAttribute('src') ||
+                            imgs[i].getAttribute('data-lazy') ||
+                            '';
+                        if (src.length < 10) continue;
 
-                        // Verificăm dimensiunea
-                        var rect = imgs[i]
-                            .getBoundingClientRect();
-                        var isBig = (
-                            rect.width > 50 ||
-                            rect.height > 50
+                        // Orice imagine mare de produs
+                        var isProduct = (
+                            src.indexOf('ProductImages') > -1 ||
+                            src.indexOf('product') > -1 ||
+                            src.indexOf('static.xd') > -1
+                        );
+                        var isBad = (
+                            src.indexOf('icon') > -1 ||
+                            src.indexOf('logo') > -1 ||
+                            src.indexOf('flag') > -1 ||
+                            src.indexOf('co2') > -1 ||
+                            src.indexOf('badge') > -1 ||
+                            src.indexOf('pixel') > -1 ||
+                            src.indexOf('svg') > -1 ||
+                            src.indexOf('data:') > -1
                         );
 
-                        if (src.length > 10 && isBig &&
-                            src.indexOf('ProductImages') > -1 &&
-                            src.indexOf('icon') === -1 &&
-                            src.indexOf('logo') === -1 &&
-                            src.indexOf('flag') === -1 &&
-                            src.indexOf('co2') === -1 &&
-                            src.indexOf('badge') === -1 &&
-                            src.indexOf('pixel') === -1) {
-
+                        if (isProduct && !isBad) {
                             var large = src
                                 .replace('/Small/', '/Large/')
                                 .replace('/Thumb/', '/Large/')
                                 .replace('/Medium/', '/Large/');
-
                             if (results.indexOf(large) === -1) {
                                 results.push(large);
                             }
                         }
                     }
 
-                    // Fallback: orice img mare cu xdconnects
+                    // Metoda 2: background-image
                     if (results.length === 0) {
-                        for (var i = 0; i < imgs.length; i++) {
-                            var src =
-                                imgs[i].getAttribute('data-src') ||
-                                imgs[i].getAttribute('src') || '';
-                            var rect = imgs[i]
-                                .getBoundingClientRect();
-
-                            if (src.length > 10 &&
-                                rect.width > 30 &&
-                                rect.height > 30 &&
-                                (src.indexOf('xdconnects') > -1 ||
-                                 src.indexOf('static') > -1) &&
-                                src.indexOf('icon') === -1 &&
-                                src.indexOf('logo') === -1) {
-                                if (results.indexOf(src) === -1) {
-                                    results.push(src);
+                        var allEls = document.querySelectorAll(
+                            '[style*="background"]'
+                        );
+                        for (var j = 0;
+                             j < allEls.length; j++) {
+                            var style =
+                                allEls[j].getAttribute('style')
+                                || '';
+                            var bgMatch = style.match(
+                                /url\\(['"]?([^'"\\)]+)/
+                            );
+                            if (bgMatch) {
+                                var bgSrc = bgMatch[1];
+                                if (bgSrc.indexOf(
+                                        'ProductImages') > -1 ||
+                                    bgSrc.indexOf(
+                                        'static.xd') > -1) {
+                                    var lg = bgSrc
+                                        .replace(
+                                            '/Small/', '/Large/'
+                                        )
+                                        .replace(
+                                            '/Thumb/', '/Large/'
+                                        );
+                                    if (results.indexOf(
+                                            lg) === -1) {
+                                        results.push(lg);
+                                    }
                                 }
                             }
                         }
                     }
 
-                    return results;
+                    // Metoda 3: srcset
+                    if (results.length === 0) {
+                        var imgs2 = document.querySelectorAll(
+                            'img[srcset]'
+                        );
+                        for (var k = 0;
+                             k < imgs2.length; k++) {
+                            var srcset =
+                                imgs2[k].getAttribute('srcset')
+                                || '';
+                            var parts = srcset.split(',');
+                            for (var p = parts.length - 1;
+                                 p >= 0; p--) {
+                                var u = parts[p].trim()
+                                    .split(' ')[0];
+                                if (u &&
+                                    u.indexOf('Product') > -1) {
+                                    if (results.indexOf(
+                                            u) === -1) {
+                                        results.push(u);
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    // Debug: raportăm câte img am găsit total
+                    var totalImgs = document
+                        .querySelectorAll('img').length;
+                    if (results.length === 0) {
+                        // Ultima încercare: ORICE imagine
+                        for (var z = 0; z < imgs.length; z++) {
+                            var s =
+                                imgs[z].getAttribute('src') ||
+                                '';
+                            var rect = imgs[z]
+                                .getBoundingClientRect();
+                            if (s.length > 10 &&
+                                rect.width > 50 &&
+                                rect.height > 50 &&
+                                s.indexOf('data:') === -1 &&
+                                s.indexOf('svg') === -1) {
+                                results.push(s);
+                                if (results.length >= 10)
+                                    break;
+                            }
+                        }
+                    }
+
+                    return {
+                        images: results,
+                        totalImgs: totalImgs
+                    };
                 """)
                 if ir:
-                    images = ir
-            except Exception as e:
-                st.warning(f"⚠️ IMG err: {str(e)[:50]}")
-
-            # Fallback imagini din soup
-            if not images:
-                for img in soup.select('img'):
-                    src = (
-                        img.get('data-src')
-                        or img.get('src')
-                        or ''
+                    images = ir.get('images', [])
+                    total_imgs = ir.get('totalImgs', 0)
+                    st.info(
+                        f"📸 Total img pe pagină: "
+                        f"{total_imgs}, "
+                        f"extrase: {len(images)}"
                     )
-                    if src and len(src) > 10:
-                        if (
-                            'xdconnects' in src
-                            or 'static' in src
-                        ):
-                            if (
-                                'icon' not in src.lower()
-                                and 'logo' not in src.lower()
-                                and 'co2' not in src.lower()
-                            ):
-                                large = (
-                                    src.replace(
-                                        '/Small/', '/Large/'
-                                    ).replace(
-                                        '/Thumb/', '/Large/'
-                                    )
-                                )
-                                abs_url = make_absolute_url(
-                                    large, self.base_url
-                                )
-                                if abs_url not in images:
-                                    images.append(abs_url)
+            except Exception as e:
+                st.warning(f"⚠️ IMG: {str(e)[:50]}")
 
-            st.info(f"📸 IMG: {len(images)} imagini")
+            st.info(
+                f"📸 IMG: {len(images)}"
+                + (
+                    f" ex: {images[0][:60]}..."
+                    if images else " GOLE"
+                )
+            )
 
             # ═══ BUILD ═══
             product = self._build_product(
@@ -651,13 +735,13 @@ class XDConnectsScraper(BaseScraper):
                 source_url=url,
                 source_site=self.name,
                 category='Rucsacuri Anti-Furt',
-                currency='RON',
+                currency=currency,
             )
             product['color_variants'] = color_variants
             product['variant_images'] = {}
 
             st.success(
-                f"✅ {name[:30]} | P:{price} | "
+                f"✅ {name[:30]} | P:{price}{currency} | "
                 f"D:{len(description)} | "
                 f"S:{len(specifications)} | "
                 f"C:{len(colors)} | I:{len(images)}"
