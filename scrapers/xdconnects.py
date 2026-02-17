@@ -131,6 +131,135 @@ class XDConnectsScraper(BaseScraper):
             st.warning(f"⚠️ XD login: {str(e)[:100]}")
             self._logged_in = True
 
+    def _click_by_text(self, texts: list[str]) -> bool:
+        """Click first visible element (button/link/tab) matching any text."""
+        if not self.driver:
+            return False
+
+        # 1) XPath tries (exact then contains, case-insensitive)
+        for t in texts:
+            t = (t or "").strip()
+            if not t:
+                continue
+            try:
+                els = self.driver.find_elements(
+                    By.XPATH,
+                    f"//*[self::button or self::a or @role='tab'][normalize-space(.)='{t}']"
+                )
+                for el in els:
+                    if el.is_displayed() and el.is_enabled():
+                        self.driver.execute_script("arguments[0].click();", el)
+                        time.sleep(1)
+                        return True
+            except Exception:
+                pass
+
+            try:
+                els = self.driver.find_elements(
+                    By.XPATH,
+                    "//*[self::button or self::a or @role='tab']"
+                    "[contains(translate(normalize-space(.),"
+                    "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),"
+                    f"'{t.lower()}')]"
+                )
+                for el in els:
+                    if el.is_displayed() and el.is_enabled():
+                        self.driver.execute_script("arguments[0].click();", el)
+                        time.sleep(1)
+                        return True
+            except Exception:
+                pass
+
+        # 2) JS fallback (handles nested spans)
+        try:
+            clicked = self.driver.execute_script(
+                """
+                const targets = arguments[0];
+                const norm = (s) => (s||'').replace(/\s+/g,' ').trim().toLowerCase();
+                const all = Array.from(document.querySelectorAll(
+                  'button,a,[role="tab"],[role="button"]'
+                ));
+                for (const t of targets){
+                  const tt = norm(t);
+                  if (!tt) continue;
+                  for (const el of all){
+                    const txt = norm(el.innerText);
+                    if (!txt) continue;
+                    if (txt === tt || txt.includes(tt)){
+                      const r = el.getBoundingClientRect();
+                      if (r.width>0 && r.height>0){ el.click(); return true; }
+                    }
+                  }
+                }
+                return false;
+                """,
+                texts,
+            )
+            if clicked:
+                time.sleep(1)
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _get_product_details_html(self) -> str:
+        """Best-effort: open Product details and return its HTML.
+        On XD, description/specs are usually rendered inside a JS tab/accordion.
+        """
+        if not self.driver:
+            return ""
+
+        # Open section (multiple locales)
+        self._click_by_text([
+            "Product details", "Product Details",
+            "Details", "Productinformatie", "Produktdetails",
+            "Detalii produs", "Detalii",
+        ])
+
+        # Expand likely accordions within details
+        try:
+            self.driver.execute_script(
+                """
+                const btns = Array.from(document.querySelectorAll('button[aria-expanded="false"]'));
+                for (const b of btns){
+                  const t=(b.innerText||'').toLowerCase();
+                  if (t.includes('product') || t.includes('detail') || t.includes('spec') || t.includes('details')){
+                    try{ b.click(); }catch(e){}
+                  }
+                }
+                """
+            )
+            time.sleep(1)
+        except Exception:
+            pass
+
+        # Grab the most plausible container
+        try:
+            html = self.driver.execute_script(
+                """
+                function textLen(el){return (el && el.innerText ? el.innerText.trim().length : 0);}
+                // 1) visible tabpanel
+                let el = document.querySelector('[role="tabpanel"]:not([hidden])');
+                if (el && textLen(el) > 80) return el.innerHTML;
+                el = document.querySelector('[role="tabpanel"].active');
+                if (el && textLen(el) > 80) return el.innerHTML;
+                // 2) IDs/classes that hint product details
+                el = document.querySelector('[id*="product-details" i], [class*="product-details" i], [data-testid*="product-details" i]');
+                if (el && textLen(el) > 80) return el.innerHTML;
+                // 3) container around the label
+                const nodes = Array.from(document.querySelectorAll('h2,h3,h4,button,a,span,div'))
+                  .filter(n => /product\s+details/i.test((n.innerText||'').trim()));
+                for (const n of nodes){
+                  const c = n.closest('section, article, div');
+                  if (c && textLen(c) > 120) return c.innerHTML;
+                }
+                return '';
+                """
+            )
+            return html or ""
+        except Exception:
+            return ""
+
     def scrape(self, url: str) -> dict | None:
         try:
             self._login_if_needed()
@@ -153,30 +282,13 @@ class XDConnectsScraper(BaseScraper):
                 )
                 time.sleep(0.8)
 
-            # Click tab-uri
+            # XD: open Product details tab early (where description/specs live)
             try:
-                tabs = self.driver.find_elements(
-                    By.CSS_SELECTOR,
-                    "[role='tab'], .nav-tabs a, "
-                    "[class*='tab'] a, "
-                    "[class*='tab'] button"
-                )
-                for tab in tabs:
-                    try:
-                        txt = tab.text.lower().strip()
-                        if any(
-                            kw in txt
-                            for kw in [
-                                'descri', 'specifi',
-                                'detail', 'feature',
-                            ]
-                        ):
-                            self.driver.execute_script(
-                                "arguments[0].click();", tab
-                            )
-                            time.sleep(1)
-                    except Exception:
-                        continue
+                self._click_by_text([
+                    "Product details", "Product Details",
+                    "Productinformatie", "Produktdetails",
+                    "Detalii produs",
+                ])
             except Exception:
                 pass
 
@@ -310,74 +422,38 @@ class XDConnectsScraper(BaseScraper):
             # ═══ DESCRIERE ═══
             description = ""
             try:
-                dr = self.driver.execute_script("""
-                    var result = '';
-                    var sels = [
-                        '[class*="description"]',
-                        '[class*="detail-desc"]',
-                        '#description',
-                        '.tab-pane',
-                        '[class*="product-info"]',
-                        '[class*="content"]',
-                        'article'
-                    ];
-                    for (var i = 0; i < sels.length; i++) {
-                        var els = document.querySelectorAll(
-                            sels[i]
-                        );
-                        for (var j = 0; j < els.length; j++) {
-                            var t = els[j].innerText.trim();
-                            if (t.length > 30 &&
-                                t.length < 5000 &&
-                                t.length > result.length &&
-                                t.indexOf('Accept') === -1 &&
-                                t.indexOf('Cookie') === -1 &&
-                                t.indexOf('cookie') === -1) {
-                                result = t;
-                            }
-                        }
-                        if (result.length > 100) break;
-                    }
-                    if (result.length < 30) {
-                        var ps = document.querySelectorAll('p');
-                        var arr = [];
-                        for (var k = 0; k < ps.length; k++) {
-                            var pt = ps[k].innerText.trim();
-                            if (pt.length > 15 &&
-                                pt.length < 500 &&
-                                pt.indexOf('Cookie') === -1 &&
-                                pt.indexOf('cookie') === -1 &&
-                                pt.indexOf('Login') === -1) {
-                                arr.push(pt);
-                            }
-                        }
-                        if (arr.length > 0)
-                            result = arr.join(' | ');
-                    }
-                    return result;
-                """)
-                if dr and len(str(dr)) > 15:
-                    raw = str(dr).strip()
-                    lines = raw.split('\n')
-                    clean = []
-                    for line in lines:
-                        line = line.strip()
-                        if (
-                            line and len(line) > 5
-                            and 'cookie' not in line.lower()
-                            and 'accept' not in line.lower()
-                            and 'login' not in line.lower()
-                            and 'ORDER' not in line
-                            and 'Add to' not in line
-                            and 'Adăugați' not in line
-                        ):
-                            clean.append(line)
-                    if clean:
-                        description = (
-                            '<p>' +
-                            '</p><p>'.join(clean[:15]) +
-                            '</p>'
-                        )
+                # Primary: Product details HTML
+                details_html = self._get_product_details_html()
+                if details_html and len(details_html) > 50:
+                    dsoup = BeautifulSoup(details_html, 'html.parser')
+                    # Gather paragraphs or meaningful list items
+                    paras = []
+                    for el in dsoup.select('p'):
+                        t = el.get_text(' ', strip=True)
+                        if 30 <= len(t) <= 900 and 'cookie' not in t.lower():
+                            paras.append(t)
+                    if not paras:
+                        for el in dsoup.select('li'):
+                            t = el.get_text(' ', strip=True)
+                            if 30 <= len(t) <= 250 and 'cookie' not in t.lower():
+                                paras.append(t)
+                    if paras:
+                        description = '<p>' + '</p><p>'.join(paras[:6]) + '</p>'
+
+                # Fallback: short summary near the title
+                if not description or len(description) < 30:
+                    dr = self.driver.execute_script("""
+                        var h1 = document.querySelector('h1');
+                        if (!h1) return '';
+                        // search nearby blocks for a bullet summary line
+                        var root = h1.closest('main, section, article, div') || document.body;
+                        var txt = (root.innerText || '').replace(/\s+/g,' ').trim();
+                        // line often contains material/volume/laptop size
+                        var m = txt.match(/\b(rPET|polyester|PU)\b[\s\S]{0,140}/i);
+                        return m ? m[0] : '';
+                    """)
+                    if dr and len(str(dr).strip()) > 20:
+                        description = '<p>' + str(dr).strip() + '</p>'
             except Exception as e:
                 st.warning(f"⚠️ DESC: {str(e)[:50]}")
 
@@ -395,68 +471,59 @@ class XDConnectsScraper(BaseScraper):
             # ═══ SPECIFICAȚII ═══
             specifications = {}
             try:
-                sp = self.driver.execute_script("""
-                    var specs = {};
-                    var tables = document.querySelectorAll(
-                        'table'
-                    );
-                    for (var t = 0; t < tables.length; t++) {
-                        var rows = tables[t]
-                            .querySelectorAll('tr');
-                        var isPrice = false;
-                        for (var r = 0;
-                             r < rows.length; r++) {
-                            var cells = rows[r]
-                                .querySelectorAll('td, th');
-                            if (cells.length >= 2) {
-                                var k = cells[0]
-                                    .innerText.trim();
-                                var v = cells[1]
-                                    .innerText.trim();
-                                // Skip price tables
-                                if (k === 'Quantity' ||
-                                    k === 'Printed*' ||
-                                    k === 'Plain' ||
-                                    v.indexOf('RON') > -1 ||
-                                    v.indexOf('EUR') > -1 ||
-                                    v.indexOf('€') > -1) {
-                                    isPrice = true;
-                                    continue;
-                                }
-                                if (!isPrice && k && v &&
-                                    k.length < 50 &&
-                                    v.length < 300) {
-                                    specs[k] = v;
-                                }
-                            }
+                details_html = self._get_product_details_html()
+                if details_html and len(details_html) > 50:
+                    dsoup = BeautifulSoup(details_html, 'html.parser')
+                    # Tables
+                    for row in dsoup.select('table tr'):
+                        cells = row.find_all(['th', 'td'])
+                        if len(cells) >= 2:
+                            k = cells[0].get_text(' ', strip=True)
+                            v = cells[1].get_text(' ', strip=True)
+                            if not k or not v:
+                                continue
+                            if any(x in v for x in ['€', 'EUR', 'RON']):
+                                continue
+                            if len(k) <= 60 and len(v) <= 400:
+                                specifications[k] = v
+                    # Definition lists
+                    dts = dsoup.select('dt')
+                    dds = dsoup.select('dd')
+                    for i in range(min(len(dts), len(dds))):
+                        k = dts[i].get_text(' ', strip=True)
+                        v = dds[i].get_text(' ', strip=True)
+                        if k and v and len(k) <= 60 and len(v) <= 400:
+                            if any(x in v for x in ['€', 'EUR', 'RON']):
+                                continue
+                            specifications[k] = v
+                    # Key: value lines
+                    if not specifications:
+                        txt = dsoup.get_text('\n', strip=True)
+                        for line in txt.split('\n'):
+                            if ':' in line and 6 <= len(line) <= 140:
+                                k, v = line.split(':', 1)
+                                k = k.strip(); v = v.strip()
+                                if k and v and len(k) <= 60 and len(v) <= 400:
+                                    if any(x in v for x in ['€', 'EUR', 'RON']):
+                                        continue
+                                    specifications[k] = v
+
+                # Final fallback (minimal)
+                if not specifications:
+                    sp = self.driver.execute_script("""
+                        var specs = {};
+                        var body = document.body.innerText || '';
+                        var m = body.match(/Item\s*no\.?\s*([A-Z0-9.]+)/i);
+                        if (m) specs['Item no.'] = m[1];
+                        // Capture the USP line block if present
+                        var uspIdx = body.toLowerCase().indexOf('integrated usb');
+                        if (uspIdx > -1) {
+                          specs['Product USPs'] = body.substring(uspIdx, uspIdx+220).replace(/\s+/g,' ').trim();
                         }
-                        if (Object.keys(specs).length > 0)
-                            break;
-                    }
-                    if (Object.keys(specs).length === 0) {
-                        var dts = document.querySelectorAll(
-                            'dt'
-                        );
-                        var dds = document.querySelectorAll(
-                            'dd'
-                        );
-                        var n = Math.min(
-                            dts.length, dds.length
-                        );
-                        for (var i = 0; i < n; i++) {
-                            var dk = dts[i].innerText.trim();
-                            var dv = dds[i].innerText.trim();
-                            if (dk && dv && dk.length < 50 &&
-                                dv.indexOf('€') === -1 &&
-                                dv.indexOf('RON') === -1) {
-                                specs[dk] = dv;
-                            }
-                        }
-                    }
-                    return specs;
-                """)
-                if sp and isinstance(sp, dict):
-                    specifications = sp
+                        return specs;
+                    """)
+                    if sp and isinstance(sp, dict):
+                        specifications = sp
             except Exception as e:
                 st.warning(f"⚠️ SPEC: {str(e)[:50]}")
 
