@@ -1,17 +1,9 @@
 # scrapers/xdconnects.py
+# VERSIUNE 3.0 - cu debug fortat
+# Ultima actualizare: fix pret, descriere, culori, imagini Large
 """
-Scraper pentru xdconnects.com (Bobby, Swiss Peak, Urban, etc.)
-Testat pe: https://www.xdconnects.com/en-gb/bags-travel/anti-theft-backpacks/
-bobby-hero-small-anti-theft-backpack-p705.70?variantId=P705.709
-
-Structura paginii:
-- Nume: h1
-- Item no: text "Item no. P705.709"
-- Preț: text "From 375,00 RON" sau "375,00 RON"
-- Culori: pătrate colorate în secțiunea "Colour:"
-- Descriere: sub secțiunea "Description" sau text sub produs
-- Specificații: tabel cu proprietăți
-- Imagini: din /en-gb/imgdtbs sau din pagină
+Scraper pentru xdconnects.com
+Fix: pret, descriere, specificatii, culori, imagini Large
 """
 import re
 import time
@@ -35,7 +27,6 @@ class XDConnectsScraper(BaseScraper):
         self._logged_in = False
 
     def _dismiss_cookie_banner(self):
-        """Închide cookie banner (Cookiebot)."""
         if not self.driver:
             return
         for sel in [
@@ -43,7 +34,9 @@ class XDConnectsScraper(BaseScraper):
             "#CybotCookiebotDialogBodyButtonAccept",
         ]:
             try:
-                btn = self.driver.find_element(By.CSS_SELECTOR, sel)
+                btn = self.driver.find_element(
+                    By.CSS_SELECTOR, sel
+                )
                 if btn.is_displayed():
                     self.driver.execute_script(
                         "arguments[0].click();", btn
@@ -56,21 +49,26 @@ class XDConnectsScraper(BaseScraper):
             self.driver.execute_script("""
                 ['#CybotCookiebotDialog',
                  '#CybotCookiebotDialogBodyUnderlay'
-                ].forEach(s => {
-                    document.querySelectorAll(s).forEach(el => el.remove());
+                ].forEach(function(s){
+                    document.querySelectorAll(s).forEach(
+                        function(el){el.remove();}
+                    );
                 });
-                document.body.style.overflow = 'auto';
+                document.body.style.overflow='auto';
             """)
         except Exception:
             pass
 
     def _login_if_needed(self):
-        """Login pe XD Connects."""
         if self._logged_in:
             return
         try:
-            xd_user = st.secrets.get("SOURCES", {}).get("XD_USER", "")
-            xd_pass = st.secrets.get("SOURCES", {}).get("XD_PASS", "")
+            xd_user = st.secrets.get("SOURCES", {}).get(
+                "XD_USER", ""
+            )
+            xd_pass = st.secrets.get("SOURCES", {}).get(
+                "XD_PASS", ""
+            )
             if not xd_user or not xd_pass:
                 return
 
@@ -79,20 +77,22 @@ class XDConnectsScraper(BaseScraper):
                 return
 
             st.info("🔐 XD: Mă conectez...")
-            self.driver.get(f"{self.base_url}/en-gb/profile/login")
+            self.driver.get(
+                self.base_url + "/en-gb/profile/login"
+            )
             time.sleep(5)
             self._dismiss_cookie_banner()
             time.sleep(1)
 
-            # Email
             for sel in [
                 "input[type='email'][name='email']",
                 "input[name='email']",
                 "input[type='email']",
             ]:
                 try:
-                    fields = self.driver.find_elements(By.CSS_SELECTOR, sel)
-                    for f in fields:
+                    for f in self.driver.find_elements(
+                        By.CSS_SELECTOR, sel
+                    ):
                         if f.is_displayed() and f.is_enabled():
                             f.clear()
                             f.send_keys(xd_user)
@@ -103,7 +103,6 @@ class XDConnectsScraper(BaseScraper):
                 except Exception:
                     continue
 
-            # Parolă
             for f in self.driver.find_elements(
                 By.CSS_SELECTOR, "input[type='password']"
             ):
@@ -112,14 +111,15 @@ class XDConnectsScraper(BaseScraper):
                     f.send_keys(xd_pass)
                     break
 
-            # Submit
             self._dismiss_cookie_banner()
             for sel in [
                 "form button[type='submit']",
                 "button[type='submit']",
             ]:
                 try:
-                    for btn in self.driver.find_elements(By.CSS_SELECTOR, sel):
+                    for btn in self.driver.find_elements(
+                        By.CSS_SELECTOR, sel
+                    ):
                         if btn.is_displayed():
                             self.driver.execute_script(
                                 "arguments[0].click();", btn
@@ -132,68 +132,62 @@ class XDConnectsScraper(BaseScraper):
             time.sleep(6)
             self._logged_in = True
             st.success("✅ XD: Login reușit!")
-
         except Exception as e:
             st.warning(f"⚠️ XD login: {str(e)[:100]}")
             self._logged_in = True
 
-    def _extract_product_variant_ids(self, url: str) -> tuple:
-        """Extrage productId și variantId din URL."""
-        product_id = ""
-        variant_id = ""
-
-        vm = re.search(r'variantId=([A-Z0-9.]+)', url, re.IGNORECASE)
-        if vm:
-            variant_id = vm.group(1).upper()
-
-        pm = re.search(r'([pP]\d{3}\.\d{2})', url)
-        if pm:
-            product_id = pm.group(1).upper()
-
-        if variant_id and not product_id:
-            parts = variant_id.rsplit('.', 1)
-            if len(parts) == 2 and len(parts[1]) > 2:
-                product_id = f"{parts[0]}.{parts[1][:2]}"
-
-        return product_id, variant_id
-
     def scrape(self, url: str) -> dict | None:
-        """Scrape produs XD Connects."""
         try:
             self._login_if_needed()
             self._init_driver()
             if not self.driver:
                 return None
 
-            st.info(f"📦 XD: Scrapez {url[:70]}...")
+            # ═══ VERSIUNE 3.0 DEBUG ═══
+            st.info(f"📦 XD v3.0: Scrapez {url[:70]}...")
             self.driver.get(url)
             time.sleep(6)
             self._dismiss_cookie_banner()
             time.sleep(2)
 
             # Scroll complet
-            for pos in ['document.body.scrollHeight/3',
-                        'document.body.scrollHeight/2',
-                        'document.body.scrollHeight', '0']:
-                self.driver.execute_script(
-                    f"window.scrollTo(0, {pos});"
-                )
-                time.sleep(0.8)
+            self.driver.execute_script(
+                "window.scrollTo(0, "
+                "document.body.scrollHeight/3);"
+            )
+            time.sleep(1)
+            self.driver.execute_script(
+                "window.scrollTo(0, "
+                "document.body.scrollHeight/2);"
+            )
+            time.sleep(1)
+            self.driver.execute_script(
+                "window.scrollTo(0, "
+                "document.body.scrollHeight);"
+            )
+            time.sleep(1)
+            self.driver.execute_script(
+                "window.scrollTo(0, 0);"
+            )
+            time.sleep(1)
 
-            # Click pe tab-uri Description / Specifications
+            # Click pe tab-uri description/specifications
             try:
                 tabs = self.driver.find_elements(
                     By.CSS_SELECTOR,
-                    "[role='tab'], .nav-tabs a, .tab-nav a, "
+                    "[role='tab'], .nav-tabs a, "
                     "[class*='tab'] a, [class*='tab'] button"
                 )
                 for tab in tabs:
                     try:
-                        text = tab.text.lower().strip()
-                        if any(kw in text for kw in [
-                            'descri', 'specifi', 'detail',
-                            'feature', 'info', 'propert',
-                        ]):
+                        txt = tab.text.lower().strip()
+                        if any(
+                            kw in txt
+                            for kw in [
+                                'descri', 'specifi',
+                                'detail', 'feature',
+                            ]
+                        ):
                             self.driver.execute_script(
                                 "arguments[0].click();", tab
                             )
@@ -206,19 +200,16 @@ class XDConnectsScraper(BaseScraper):
             page_source = self.driver.page_source
             soup = BeautifulSoup(page_source, 'html.parser')
 
-            # ═══════════════════════════════
-            # NUME
-            # ═══════════════════════════════
+            # ═══ NUME ═══
             name = ""
             h1 = soup.select_one('h1')
             if h1:
                 name = h1.get_text(strip=True)
             if not name:
                 name = "Produs XD Connects"
+            st.info(f"📋 XD NUME: {name}")
 
-            # ═══════════════════════════════
-            # SKU / ITEM NO
-            # ═══════════════════════════════
+            # ═══ SKU ═══
             sku = ""
             item_match = re.search(
                 r'Item\s*no\.?\s*:?\s*([A-Z0-9.]+)',
@@ -227,217 +218,197 @@ class XDConnectsScraper(BaseScraper):
             if item_match:
                 sku = item_match.group(1).upper()
             if not sku:
-                sku_match = re.search(r'([pP]\d{3}\.\d{2,3})', url)
-                if sku_match:
-                    sku = sku_match.group(1).upper()
+                sm = re.search(r'([pP]\d{3}\.\d{2,3})', url)
+                if sm:
+                    sku = sm.group(1).upper()
+            st.info(f"📋 XD SKU: {sku}")
 
-            product_id, variant_id = (
-                self._extract_product_variant_ids(url)
-            )
-
-            # ═══════════════════════════════
-            # PREȚ - cu Selenium direct
-            # ═══════════════════════════════
+            # ═══ PREȚ ═══
             price = 0.0
             try:
-                price_text = self.driver.execute_script("""
-                    // Căutăm textul cu preț RON
-                    var allText = document.body.innerText;
-                    var match = allText.match(
-                        /(?:From\\s+)?(\\d+[.,]\\d{2})\\s*RON/i
+                price_result = self.driver.execute_script("""
+                    var body = document.body.innerText;
+                    var m = body.match(
+                        /(?:From\\s+)?(\\d{1,5}[.,]\\d{2})\\s*RON/i
                     );
-                    if (match) return match[1];
+                    if (m) return m[1];
 
-                    // Fallback: căutăm elemente cu "price"
-                    var priceEls = document.querySelectorAll(
+                    var els = document.querySelectorAll(
                         '[class*="price"], .price'
                     );
-                    for (var i = 0; i < priceEls.length; i++) {
-                        var t = priceEls[i].innerText.trim();
-                        var m = t.match(/(\\d+[.,]\\d{2})/);
-                        if (m) return m[1];
+                    for (var i = 0; i < els.length; i++) {
+                        var t = els[i].innerText.trim();
+                        var pm = t.match(/(\\d{1,5}[.,]\\d{2})/);
+                        if (pm) return pm[1];
                     }
-
                     return '';
                 """)
-                if price_text:
-                    price = clean_price(price_text)
-                    st.info(f"💰 XD: Preț extras: {price} RON")
-            except Exception:
-                pass
+                if price_result:
+                    price = clean_price(str(price_result))
+            except Exception as e:
+                st.warning(f"⚠️ XD PREȚ JS err: {str(e)[:50]}")
 
             if price <= 0:
-                # Regex pe page source
-                price_match = re.search(
-                    r'(?:From\s+)?(\d+[.,]\d{2})\s*RON',
+                pm = re.search(
+                    r'(\d{1,5}[.,]\d{2})\s*RON',
                     page_source, re.IGNORECASE
                 )
-                if price_match:
-                    price = clean_price(price_match.group(1))
+                if pm:
+                    price = clean_price(pm.group(1))
+            st.info(f"💰 XD PREȚ: {price} RON")
 
-            # ═══════════════════════════════
-            # DESCRIERE - cu Selenium
-            # ═══════════════════════════════
+            # ═══ DESCRIERE ═══
             description = ""
             try:
-                desc_text = self.driver.execute_script("""
+                desc_result = self.driver.execute_script("""
                     var result = '';
 
-                    // Metoda 1: Căutăm container description
-                    var descSels = [
+                    // 1. Container description
+                    var sels = [
                         '[class*="description"]',
-                        '[class*="detail-description"]',
-                        '[class*="product-description"]',
-                        '#description', '#tab-description',
-                        '[data-tab="description"]',
-                        '.tab-pane',
+                        '[class*="detail-desc"]',
+                        '#description',
+                        '.tab-pane.active',
+                        '[class*="product-info"]',
                     ];
-                    for (var i = 0; i < descSels.length; i++) {
-                        var els = document.querySelectorAll(
-                            descSels[i]
-                        );
+                    for (var i = 0; i < sels.length; i++) {
+                        var els = document.querySelectorAll(sels[i]);
                         for (var j = 0; j < els.length; j++) {
-                            var text = els[j].innerText.trim();
-                            if (text.length > 30 &&
-                                text.length > result.length &&
-                                text.length < 5000) {
-                                result = text;
+                            var t = els[j].innerText.trim();
+                            if (t.length > 30 &&
+                                t.length < 5000 &&
+                                t.length > result.length &&
+                                t.indexOf('Accept') === -1 &&
+                                t.indexOf('Cookie') === -1) {
+                                result = t;
                             }
                         }
-                        if (result.length > 100) break;
+                        if (result.length > 80) break;
                     }
 
-                    // Metoda 2: Textul de sub titlu/preț
+                    // 2. Bullet points sub produs
                     if (result.length < 30) {
-                        var h1 = document.querySelector('h1');
-                        if (h1) {
-                            var parent = h1.closest('div') ||
-                                         h1.parentElement;
-                            if (parent) {
-                                var sibs = parent.parentElement
-                                    .querySelectorAll('div, p, section');
-                                for (var k = 0; k < sibs.length; k++) {
-                                    var t = sibs[k].innerText.trim();
-                                    if (t.length > 50 &&
-                                        t.length < 3000 &&
-                                        !t.includes('Add to cart') &&
-                                        !t.includes('ORDER') &&
-                                        t.length > result.length) {
-                                        result = t;
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Metoda 3: Bullet points / features
-                    if (result.length < 30) {
-                        var bullets = document.querySelectorAll(
-                            'ul li, .feature, [class*="bullet"]'
+                        var body = document.body.innerText;
+                        var bm = body.match(
+                            /([\\w]+\\s*[•●]\\s*[^\\n]{10,500})/
                         );
-                        var bulletTexts = [];
-                        for (var b = 0; b < bullets.length; b++) {
-                            var bt = bullets[b].innerText.trim();
-                            if (bt.length > 10 && bt.length < 200 &&
-                                !bt.includes('Login') &&
-                                !bt.includes('Cart')) {
-                                bulletTexts.push('• ' + bt);
+                        if (bm) result = bm[1];
+                    }
+
+                    // 3. Paragrafele
+                    if (result.length < 30) {
+                        var ps = document.querySelectorAll('p');
+                        var texts = [];
+                        for (var k = 0; k < ps.length; k++) {
+                            var pt = ps[k].innerText.trim();
+                            if (pt.length > 20 &&
+                                pt.length < 500 &&
+                                pt.indexOf('Cookie') === -1 &&
+                                pt.indexOf('Accept') === -1 &&
+                                pt.indexOf('Login') === -1) {
+                                texts.push(pt);
                             }
                         }
-                        if (bulletTexts.length >= 2) {
-                            result = bulletTexts.join('\\n');
+                        if (texts.length > 0) {
+                            result = texts.join(' ');
                         }
                     }
 
                     return result;
                 """)
-
-                if desc_text and len(desc_text) > 20:
-                    # Curățăm și formatăm
-                    lines = desc_text.split('\n')
-                    clean_lines = []
+                if desc_result and len(str(desc_result)) > 15:
+                    raw = str(desc_result).strip()
+                    lines = raw.split('\n')
+                    clean = []
                     for line in lines:
                         line = line.strip()
                         if (
                             line
                             and len(line) > 5
                             and 'cookie' not in line.lower()
+                            and 'accept' not in line.lower()
                             and 'login' not in line.lower()
-                            and 'cart' not in line.lower()
                             and 'ORDER' not in line
                             and 'Add to' not in line
+                            and 'Adăugați' not in line
                         ):
-                            clean_lines.append(line)
-
-                    if clean_lines:
-                        description = '<p>' + '</p>\n<p>'.join(
-                            clean_lines[:15]
-                        ) + '</p>'
-                        st.info(
-                            f"📝 XD: Descriere: "
-                            f"{len(description)} car"
+                            clean.append(line)
+                    if clean:
+                        description = (
+                            '<p>'
+                            + '</p>\n<p>'.join(clean[:10])
+                            + '</p>'
                         )
-
             except Exception as e:
-                st.warning(f"⚠️ XD desc: {str(e)[:60]}")
+                st.warning(
+                    f"⚠️ XD DESC JS err: {str(e)[:50]}"
+                )
 
-            # Fallback descriere din meta
+            # Fallback meta description
             if not description or len(description) < 30:
-                meta = soup.select_one('meta[name="description"]')
+                meta = soup.select_one(
+                    'meta[name="description"]'
+                )
                 if meta:
-                    content = meta.get('content', '')
-                    if content:
-                        description = f"<p>{content}</p>"
+                    mc = meta.get('content', '')
+                    if mc and len(mc) > 15:
+                        description = f"<p>{mc}</p>"
 
-            # Fallback din text scurt pe pagină
+            # Fallback text produs
             if not description or len(description) < 30:
-                short_match = re.search(
-                    r'((?:rPET|PVC|recycled|anti-theft|volume|laptop|'
-                    r'RFID|waterproof|water.?resistant)'
-                    r'[^<]{10,500})',
+                tm = re.search(
+                    r'((?:rPET|PVC|recycled|anti.?theft|'
+                    r'volume|laptop|RFID|water)'
+                    r'[^<\n]{10,500})',
                     page_source, re.IGNORECASE
                 )
-                if short_match:
-                    description = f"<p>{short_match.group(1).strip()}</p>"
+                if tm:
+                    description = (
+                        f"<p>{tm.group(1).strip()}</p>"
+                    )
 
-            # ═══════════════════════════════
-            # SPECIFICAȚII - cu Selenium
-            # ═══════════════════════════════
+            st.info(
+                f"📝 XD DESC: {len(description)} caractere"
+            )
+
+            # ═══ SPECIFICAȚII ═══
             specifications = {}
             try:
-                js_specs = self.driver.execute_script("""
+                spec_result = self.driver.execute_script("""
                     var specs = {};
 
-                    // Metoda 1: Tabele
+                    // 1. Tabele
                     var tables = document.querySelectorAll('table');
                     for (var t = 0; t < tables.length; t++) {
                         var rows = tables[t].querySelectorAll('tr');
                         for (var r = 0; r < rows.length; r++) {
-                            var cells = rows[r]
-                                .querySelectorAll('td, th');
+                            var cells = rows[r].querySelectorAll(
+                                'td, th'
+                            );
                             if (cells.length >= 2) {
-                                var key = cells[0].innerText.trim();
-                                var val = cells[1].innerText.trim();
-                                if (key && val &&
-                                    key.length < 50 &&
-                                    val.length < 300 &&
-                                    key !== 'Quantity' &&
-                                    key !== 'Printed*' &&
-                                    !key.includes('RON')) {
-                                    specs[key] = val;
+                                var k = cells[0].innerText.trim();
+                                var v = cells[1].innerText.trim();
+                                if (k && v &&
+                                    k.length < 50 &&
+                                    v.length < 300 &&
+                                    k !== 'Quantity' &&
+                                    k !== 'Printed*' &&
+                                    k.indexOf('RON') === -1) {
+                                    specs[k] = v;
                                 }
                             }
                         }
                         if (Object.keys(specs).length > 0) break;
                     }
 
-                    // Metoda 2: dt/dd
+                    // 2. dt/dd
                     if (Object.keys(specs).length === 0) {
                         var dts = document.querySelectorAll('dt');
                         var dds = document.querySelectorAll('dd');
-                        for (var i = 0;
-                             i < Math.min(dts.length, dds.length);
-                             i++) {
+                        var len = Math.min(
+                            dts.length, dds.length
+                        );
+                        for (var i = 0; i < len; i++) {
                             var k = dts[i].innerText.trim();
                             var v = dds[i].innerText.trim();
                             if (k && v && k.length < 50) {
@@ -446,47 +417,21 @@ class XDConnectsScraper(BaseScraper):
                         }
                     }
 
-                    // Metoda 3: Textul cu bullet points
+                    // 3. Text "rPET • Volume 10.5L • ..."
                     if (Object.keys(specs).length === 0) {
-                        var allText = document.body.innerText;
-                        var bulletMatch = allText.match(
-                            /[•●]\s*(.+)/g
+                        var body = document.body.innerText;
+                        var dm = body.match(
+                            /((?:rPET|PVC|recycled|polyester)' +
+                            '\\s*[•●][^\\n]{10,300})/i
                         );
-                        if (bulletMatch) {
-                            for (var b = 0;
-                                 b < bulletMatch.length; b++) {
-                                var bt = bulletMatch[b]
-                                    .replace(/[•●]\s*/, '').trim();
-                                if (bt.indexOf(':') > 0) {
-                                    var parts = bt.split(':');
-                                    specs[parts[0].trim()] =
-                                        parts.slice(1).join(':')
-                                        .trim();
-                                } else if (bt.length > 5 &&
-                                           bt.length < 100) {
-                                    specs['Feature ' +
-                                        (Object.keys(specs)
-                                        .length + 1)] = bt;
-                                }
-                            }
-                        }
-                    }
-
-                    // Metoda 4: Text sub produs
-                    // "rPET • Volume 10.5L • Laptop..."
-                    if (Object.keys(specs).length === 0) {
-                        var allText = document.body.innerText;
-                        var dotMatch = allText.match(
-                            /([A-Za-z]+\\s*•\\s*[^\\n]+)/
-                        );
-                        if (dotMatch) {
-                            var items = dotMatch[1].split('•');
+                        if (dm) {
+                            var items = dm[1].split(/[•●]/);
                             for (var d = 0;
                                  d < items.length; d++) {
                                 var item = items[d].trim();
-                                if (item) {
-                                    specs['Caracteristică ' +
-                                        (d + 1)] = item;
+                                if (item && item.length > 2) {
+                                    specs['Feature ' +
+                                        (d+1)] = item;
                                 }
                             }
                         }
@@ -494,116 +439,77 @@ class XDConnectsScraper(BaseScraper):
 
                     return specs;
                 """)
-
-                if js_specs and isinstance(js_specs, dict):
-                    specifications = js_specs
-                    if specifications:
-                        st.info(
-                            f"📋 XD: {len(specifications)} specificații"
-                        )
-
+                if (
+                    spec_result
+                    and isinstance(spec_result, dict)
+                ):
+                    specifications = spec_result
             except Exception as e:
-                st.warning(f"⚠️ XD specs: {str(e)[:60]}")
+                st.warning(
+                    f"⚠️ XD SPEC JS err: {str(e)[:50]}"
+                )
 
-            # Extrage "rPET • Volume 10.5L • Laptop..." ca specs
+            # Fallback specs din regex
             if not specifications:
-                dot_match = re.search(
-                    r'((?:rPET|PVC|recycled|anti.?theft|polyester)'
-                    r'\s*[•●]\s*[^<\n]{10,300})',
+                dm = re.search(
+                    r'((?:rPET|PVC|recycled|anti.?theft|'
+                    r'polyester)\s*[•●]\s*[^<\n]{10,300})',
                     page_source, re.IGNORECASE
                 )
-                if dot_match:
-                    items = dot_match.group(1).split('•')
+                if dm:
+                    items = re.split(r'[•●]', dm.group(1))
                     for i, item in enumerate(items):
                         item = item.strip()
-                        if item:
-                            if ':' in item:
-                                parts = item.split(':', 1)
-                                specifications[
-                                    parts[0].strip()
-                                ] = parts[1].strip()
-                            else:
-                                specifications[
-                                    f'Caracteristică {i+1}'
-                                ] = item
+                        if item and len(item) > 2:
+                            specifications[
+                                f'Caracteristică {i+1}'
+                            ] = item
 
-            # ═══════════════════════════════
-            # CULORI - cu Selenium
-            # ═══════════════════════════════
+            st.info(
+                f"📋 XD SPECS: {len(specifications)} "
+                f"({list(specifications.keys())[:3]})"
+            )
+
+            # ═══ CULORI ═══
             colors = []
             color_variants = []
             try:
-                js_colors = self.driver.execute_script("""
+                color_result = self.driver.execute_script("""
                     var results = [];
 
-                    // Căutăm secțiunea "Colour:"
-                    var allEls = document.querySelectorAll('*');
-                    var colourSection = null;
-                    for (var i = 0; i < allEls.length; i++) {
-                        var t = allEls[i].textContent.trim();
-                        if (t === 'Colour:' || t === 'Color:') {
-                            colourSection =
-                                allEls[i].parentElement;
-                            break;
+                    // Căutăm "Colour:" section
+                    var all = document.querySelectorAll('*');
+                    var section = null;
+                    for (var i = 0; i < all.length; i++) {
+                        var t = all[i].childNodes;
+                        for (var c = 0; c < t.length; c++) {
+                            if (t[c].nodeType === 3 &&
+                                t[c].textContent.trim()
+                                    .match(/^Colou?r:?$/i)) {
+                                section = all[i].parentElement;
+                                break;
+                            }
+                        }
+                        if (section) break;
+                    }
+
+                    // Fallback: căutăm label-ul
+                    if (!section) {
+                        var labels = document.querySelectorAll(
+                            'label, span, div'
+                        );
+                        for (var i = 0; i < labels.length; i++) {
+                            var lt = labels[i].textContent.trim();
+                            if (lt.match(/^Colou?r:?$/i)) {
+                                section =
+                                    labels[i].parentElement;
+                                break;
+                            }
                         }
                     }
 
-                    if (colourSection) {
-                        // Luăm elementele clickabile
-                        var items = colourSection.querySelectorAll(
-                            'a[href*="variantId"], a, button'
-                        );
-                        items.forEach(function(el) {
-                            var name = (
-                                el.getAttribute('title') ||
-                                el.getAttribute('aria-label') ||
-                                el.getAttribute('data-color') ||
-                                ''
-                            ).trim();
-
-                            var href = (
-                                el.getAttribute('href') || ''
-                            );
-
-                            // Extragem variantId
-                            var vidMatch = href.match(
-                                /variantId=([A-Z0-9.]+)/i
-                            );
-                            var vid = vidMatch ?
-                                vidMatch[1].toUpperCase() : '';
-
-                            // Dacă nu are nume, verificăm
-                            // background-color
-                            if (!name) {
-                                var bg = window.getComputedStyle(el)
-                                    .backgroundColor;
-                                if (bg &&
-                                    bg !== 'rgba(0, 0, 0, 0)' &&
-                                    bg !== 'transparent') {
-                                    name = vid || bg;
-                                }
-                            }
-
-                            // Excludem butoanele care NU sunt
-                            // de culoare
-                            if (name &&
-                                !name.includes('Add') &&
-                                !name.includes('cart') &&
-                                !name.includes('ORDER') &&
-                                !name.includes('Adăugați') &&
-                                name.length < 30) {
-                                results.push({
-                                    name: name,
-                                    href: href,
-                                    variantId: vid
-                                });
-                            }
-                        });
-                    }
-
-                    // Fallback: linkuri cu variantId
-                    if (results.length === 0) {
-                        var links = document.querySelectorAll(
+                    if (section) {
+                        var links = section.querySelectorAll(
                             'a[href*="variantId"]'
                         );
                         links.forEach(function(el) {
@@ -612,26 +518,75 @@ class XDConnectsScraper(BaseScraper):
                                 el.getAttribute('aria-label') ||
                                 ''
                             ).trim();
-                            var href = el.getAttribute('href') || '';
-                            var vidMatch = href.match(
+                            var href =
+                                el.getAttribute('href') || '';
+                            var vm = href.match(
                                 /variantId=([A-Z0-9.]+)/i
                             );
-                            var vid = vidMatch ?
-                                vidMatch[1].toUpperCase() : '';
+                            var vid = vm ?
+                                vm[1].toUpperCase() : '';
 
-                            if (!name) name = vid;
+                            if (!name && vid) name = vid;
 
-                            if (name &&
-                                !name.includes('Add') &&
-                                !name.includes('cart') &&
-                                name.length < 30 &&
+                            if (name && name.length < 25 &&
+                                name.indexOf('Add') === -1 &&
+                                name.indexOf('Adăugați') === -1 &&
+                                name.indexOf('cart') === -1 &&
+                                name.indexOf('coș') === -1) {
+                                results.push({
+                                    name: name,
+                                    href: href,
+                                    vid: vid
+                                });
+                            }
+                        });
+                    }
+
+                    // Fallback: toate linkurile variantId
+                    if (results.length === 0) {
+                        var allLinks = document.querySelectorAll(
+                            'a[href*="variantId"]'
+                        );
+                        allLinks.forEach(function(el) {
+                            var name = (
+                                el.getAttribute('title') ||
+                                el.getAttribute('aria-label') ||
+                                ''
+                            ).trim();
+                            var href =
+                                el.getAttribute('href') || '';
+                            var vm = href.match(
+                                /variantId=([A-Z0-9.]+)/i
+                            );
+                            var vid = vm ?
+                                vm[1].toUpperCase() : '';
+
+                            if (!name && vid) name = vid;
+
+                            // FILTRU STRICT:
+                            // exclus butoane add to cart
+                            var isColorSwatch = (
+                                name.length < 25 &&
+                                name.indexOf('Add') === -1 &&
+                                name.indexOf('Adăugați') === -1 &&
+                                name.indexOf('cart') === -1 &&
+                                name.indexOf('coș') === -1 &&
+                                name.indexOf('ORDER') === -1 &&
+                                name.indexOf('rucsac') === -1 &&
+                                name.indexOf('Bobby') === -1 &&
+                                name.indexOf('backpack') === -1
+                            );
+
+                            if (name && isColorSwatch &&
                                 !results.some(
-                                    r => r.name === name
+                                    function(r){
+                                        return r.name === name;
+                                    }
                                 )) {
                                 results.push({
                                     name: name,
                                     href: href,
-                                    variantId: vid
+                                    vid: vid
                                 });
                             }
                         });
@@ -640,83 +595,71 @@ class XDConnectsScraper(BaseScraper):
                     return results;
                 """)
 
-                if js_colors:
-                    for item in js_colors:
-                        c_name = item.get('name', '').strip()
-                        if c_name and c_name not in colors:
-                            colors.append(c_name)
+                if color_result:
+                    for item in color_result:
+                        c = item.get('name', '').strip()
+                        if c and c not in colors:
+                            colors.append(c)
                             color_variants.append({
-                                'name': c_name,
+                                'name': c,
                                 'url': make_absolute_url(
                                     item.get('href', ''),
                                     self.base_url
                                 ),
                                 'image': '',
                                 'color_code': item.get(
-                                    'variantId', ''
+                                    'vid', ''
                                 ),
                                 'variant_id': item.get(
-                                    'variantId', ''
+                                    'vid', ''
                                 ),
                             })
 
-                if colors:
-                    st.info(
-                        f"🎨 XD: {len(colors)} culori: "
-                        f"{', '.join(colors[:5])}"
-                        + ("..." if len(colors) > 5 else "")
-                    )
-
             except Exception as e:
-                st.warning(f"⚠️ XD colors: {str(e)[:60]}")
+                st.warning(
+                    f"⚠️ XD CULORI err: {str(e)[:50]}"
+                )
 
-            # ═══════════════════════════════
-            # IMAGINI - din pagină (rezoluție mare)
-            # ═══════════════════════════════
+            st.info(
+                f"🎨 XD CULORI: {len(colors)} = "
+                f"{colors[:5]}"
+            )
+
+            # ═══ IMAGINI (Large) ═══
             images = []
             try:
-                js_images = self.driver.execute_script("""
+                img_result = self.driver.execute_script("""
                     var results = [];
                     var imgs = document.querySelectorAll('img');
-
                     imgs.forEach(function(img) {
-                        var src = img.getAttribute('data-src') ||
-                                  img.getAttribute('src') ||
-                                  img.getAttribute('data-lazy') || '';
-
+                        var src =
+                            img.getAttribute('data-src') ||
+                            img.getAttribute('src') || '';
                         if (src &&
-                            src.includes('xdconnects.com') &&
-                            src.includes('ProductImages') &&
-                            !src.includes('icon') &&
-                            !src.includes('logo') &&
-                            !src.includes('flag') &&
-                            !src.includes('co2') &&
-                            !src.includes('badge')) {
-
-                            // Convertim la rezoluție mare
-                            // Small → Large sau Original
-                            var largeSrc = src
+                            src.indexOf('xdconnects.com') > -1 &&
+                            src.indexOf('ProductImages') > -1 &&
+                            src.indexOf('icon') === -1 &&
+                            src.indexOf('logo') === -1 &&
+                            src.indexOf('flag') === -1 &&
+                            src.indexOf('co2') === -1 &&
+                            src.indexOf('badge') === -1) {
+                            // Small -> Large
+                            var large = src
                                 .replace('/Small/', '/Large/')
                                 .replace('/Thumb/', '/Large/')
                                 .replace('/Medium/', '/Large/');
-
-                            if (!results.includes(largeSrc)) {
-                                results.push(largeSrc);
+                            if (results.indexOf(large) === -1) {
+                                results.push(large);
                             }
                         }
                     });
-
                     return results;
                 """)
-
-                if js_images:
-                    images = js_images
-                    st.info(f"📸 XD: {len(images)} imagini (Large)")
-
+                if img_result:
+                    images = img_result
             except Exception:
                 pass
 
-            # Fallback: imagini din soup
             if not images:
                 for img in soup.select('img'):
                     src = (
@@ -729,22 +672,20 @@ class XDConnectsScraper(BaseScraper):
                         and 'ProductImages' in src
                         and 'icon' not in src.lower()
                         and 'logo' not in src.lower()
-                        and 'co2' not in src.lower()
                     ):
-                        large_src = (
+                        large = (
                             src.replace('/Small/', '/Large/')
                             .replace('/Thumb/', '/Large/')
-                            .replace('/Medium/', '/Large/')
                         )
                         abs_url = make_absolute_url(
-                            large_src, self.base_url
+                            large, self.base_url
                         )
                         if abs_url not in images:
                             images.append(abs_url)
 
-            # ═══════════════════════════════
-            # CONSTRUIM PRODUSUL
-            # ═══════════════════════════════
+            st.info(f"📸 XD IMG: {len(images)} imagini")
+
+            # ═══ BUILD PRODUCT ═══
             product = self._build_product(
                 name=name,
                 sku=sku,
@@ -758,23 +699,20 @@ class XDConnectsScraper(BaseScraper):
                 category='Rucsacuri Anti-Furt',
                 currency='RON',
             )
-
             product['color_variants'] = color_variants
             product['variant_images'] = {}
-            product['product_id'] = product_id
-            product['variant_id'] = variant_id
 
             st.success(
-                f"📦 XD: {name[:40]} | SKU: {sku} | "
-                f"Preț: {price} RON | "
-                f"Desc: {len(description)} car | "
-                f"Specs: {len(specifications)} | "
-                f"Culori: {len(colors)} | "
-                f"Img: {len(images)}"
+                f"✅ XD: {name[:30]} | "
+                f"Preț:{price} | "
+                f"Desc:{len(description)}c | "
+                f"Spec:{len(specifications)} | "
+                f"Cul:{len(colors)} | "
+                f"Img:{len(images)}"
             )
 
             return product
 
         except Exception as e:
-            st.error(f"❌ XD scrape error: {str(e)}")
+            st.error(f"❌ XD error: {str(e)}")
             return None
