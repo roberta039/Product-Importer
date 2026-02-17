@@ -158,6 +158,57 @@ def _parse_product_details_from_text(raw_text: str) -> (str, Dict[str, str]):
     return description_text, specs
 
 
+
+def _parse_product_details_from_html(soup: BeautifulSoup) -> (str, Dict[str, str]):
+    """
+    Parse product details from HTML without clicking tabs.
+    Works even if the content is hidden (display:none) because we read the DOM.
+    Tries: tables, dl/dt/dd, and generic 2-column rows.
+    """
+    if soup is None:
+        return "", {}
+
+    specs: Dict[str, str] = {}
+
+    # 1) tables
+    for table in soup.select("table"):
+        for row in table.select("tr"):
+            cells = row.find_all(["th", "td"])
+            if len(cells) >= 2:
+                k = cells[0].get_text(" ", strip=True)
+                v = cells[1].get_text(" ", strip=True)
+                if k and v and len(k) <= 60:
+                    specs[k.strip()] = v.strip()
+
+    # 2) definition lists
+    for dl in soup.select("dl"):
+        for dt in dl.find_all("dt"):
+            dd = dt.find_next_sibling("dd")
+            if not dd:
+                continue
+            k = dt.get_text(" ", strip=True)
+            v = dd.get_text(" ", strip=True)
+            if k and v and len(k) <= 60:
+                specs[k.strip()] = v.strip()
+
+    # 3) generic 2-column rows (div/span)
+    known_keys = {"Description", "Item no.", "Product USPs", "Primary specifications", "CO2-eq", "Colour", "Color"}
+    for key in list(known_keys):
+        node = soup.find(lambda tag: tag.name in {"div","span","p","strong","th","td"} and tag.get_text(" ", strip=True) == key)
+        if node and key not in specs:
+            cand = node.find_next_sibling()
+            if not cand:
+                cand = node.find_next()
+            if cand:
+                v = cand.get_text(" ", strip=True)
+                v = re.sub(r"\s{2,}", " ", v).strip()
+                if v and v.lower() != key.lower():
+                    specs[key] = v
+
+    desc = specs.get("Description", "")
+    return desc, specs
+
+
 class XDConnectsScraper(BaseScraper):
     def __init__(self):
         super().__init__()
@@ -360,16 +411,27 @@ class XDConnectsScraper(BaseScraper):
                     r"""
                     const body = document.body.innerText || '';
                     const res = {price:'', currency:''};
-                    let m = body.match(/(?:From\s+)?(\d{1,6}[.,]\d{2})\s*RON/i);
+
+                    // Prefer explicit 'Price' line if present
+                    let m = body.match(/\bPrice\b\s*€\s*(\d{1,6}(?:[\.,]\d{1,2})?)/i);
+                    if (m) { res.price=m[1]; res.currency='EUR'; return res; }
+
+                    // Or 'From Price €73.8' style
+                    m = body.match(/\bFrom\b[\s\S]{0,40}?\bPrice\b\s*€\s*(\d{1,6}(?:[\.,]\d{1,2})?)/i);
+                    if (m) { res.price=m[1]; res.currency='EUR'; return res; }
+
+                    // Or standalone euro amount '€ 73,80'
+                    m = body.match(/€\s*(\d{1,6}(?:[\.,]\d{1,2})?)/);
+                    if (m) { res.price=m[1]; res.currency='EUR'; return res; }
+
+                    // RON format
+                    m = body.match(/(\d{1,6}(?:[\.,]\d{1,2})?)\s*RON/i);
                     if (m) { res.price=m[1]; res.currency='RON'; return res; }
-                    m = body.match(/(?:From\s+)?[€]\s*(\d{1,6}[.,]\d{2})/);
-                    if (m) { res.price=m[1]; res.currency='EUR'; return res; }
-                    m = body.match(/(?:From\s+)?(\d{1,6}[.,]\d{2})\s*EUR/i);
-                    if (m) { res.price=m[1]; res.currency='EUR'; return res; }
+
                     return res;
                     """
                 )
-                if price_info and price_info.get("price"):
+if price_info and price_info.get("price"):
                     price = clean_price(str(price_info.get("price")))
                     currency = price_info.get("currency", "EUR")
             except Exception:
@@ -377,24 +439,48 @@ class XDConnectsScraper(BaseScraper):
 
             st.info(f"💰 PREȚ: {price} {currency}")
 
-            # Product details: parse from raw text first (most reliable)
-            description_text, specifications = _parse_product_details_from_text(raw_text)
+            # Product details:
+            # 1) Try HTML (includes hidden DOM), 2) then raw_text (visible text fallback)
+            description_text, specifications = _parse_product_details_from_html(soup)
 
-            # If empty, try HTML tables as fallback
             if not specifications:
-                # look for a table that has 'Description' row
-                for table in soup.select("table"):
-                    rows = table.select("tr")
-                    for row in rows:
-                        cells = row.find_all(["th", "td"])
-                        if len(cells) >= 2:
-                            k = cells[0].get_text(" ", strip=True)
-                            v = cells[1].get_text(" ", strip=True)
-                            if k and v:
-                                specifications[k.strip()] = v.strip()
-                description_text = specifications.get("Description", description_text)
+                description_text, specifications = _parse_product_details_from_text(raw_text)
+
+            # If still empty, last-chance: pull textContent from DOM via JS (even if hidden)
+            if not specifications:
+                try:
+                    dom_text = self.driver.execute_script(
+                        """
+                        const all = Array.from(document.querySelectorAll('body *'));
+                        const hits = all
+                          .filter(e => {
+                            const t = (e.textContent||'').trim();
+                            if (!t) return false;
+                            return (t.includes('Description') && t.includes('Item no.')) ||
+                                   (t.includes('Product USPs') && t.includes('Description')) ||
+                                   (t.includes('Primary specifications') && t.includes('CO2'));
+                          })
+                          .slice(0, 25)
+                          .map(e => (e.textContent||'').trim())
+                          .join('
+');
+                        return hits;
+                        """
+                    ) or ""
+                    if dom_text:
+                        d2, s2 = _parse_product_details_from_text(dom_text)
+                        if s2:
+                            description_text = d2 or description_text
+                            specifications = s2
+                except Exception:
+                    pass
+
+            # normalize: ensure dict
+            if isinstance(specifications, list):
+                specifications = _specs_to_dict(specifications)
 
             # Always include Item no.
+
             if sku and "Item no." not in specifications:
                 specifications["Item no."] = sku
 
