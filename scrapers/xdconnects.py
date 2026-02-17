@@ -21,26 +21,6 @@ from selenium.common.exceptions import (
 )
 
 
-
-XD_SCRAPER_VERSION = "2026-02-17-xd-colors-hotfix-1"
-print("XD SCRAPER VERSION:", XD_SCRAPER_VERSION)
-
-def _extract_colour_from_text(raw_text: str):
-    if not raw_text:
-        return None
-    # 1) 'Colour <valoare>'
-    m = re.search(r"\bColour\b\s*[:\t ]+\s*([^\n\r\t]+)", raw_text, flags=re.IGNORECASE)
-    if m:
-        val = m.group(1).strip()
-        val = re.split(r"\s{2,}|\t|•|\|", val)[0].strip()
-        if 1 <= len(val) <= 40:
-            return val
-    # 2) dupa 'Item no. P705.xxx' de obicei e culoarea pe linia urmatoare
-    m = re.search(r"Item no\.\s*[A-Z0-9\.]+\s*\n([A-Za-z][A-Za-z \-]{2,40})\n", raw_text)
-    if m:
-        return m.group(1).strip()
-    return None
-
 class XDConnectsScraper(BaseScraper):
     def __init__(self):
         super().__init__()
@@ -588,39 +568,38 @@ class XDConnectsScraper(BaseScraper):
             except Exception as e:
                 st.warning(f"⚠️ CULORI: {str(e)[:50]}")
 
-            
-            # Fallback culoare (XD nu expune mereu swatch-urile ca link-uri cu variantId)
-            text_for_color = ""
-            try:
-                text_for_color = visible_text  # primele ~2000 caractere
-            except Exception:
-                text_for_color = ""
 
-            if not text_for_color:
+            # Fallback: dacă nu există variante (swatch), ia culoarea curentă din specs sau din textul paginii
+            if not colors:
+                # 1) din specifications (dict)
                 try:
-                    text_for_color = self.driver.execute_script(
-                        "return document.body.innerText.substring(0, 4000);"
-                    )
+                    # caută chei tipice (case-insensitive)
+                    for k, v in (specifications or {}).items():
+                        if str(k).strip().lower() in ("colour", "color", "culoare") and str(v).strip():
+                            colors = [str(v).strip()]
+                            break
                 except Exception:
-                    text_for_color = ""
+                    pass
 
             if not colors:
-                # 1) din specificatii
-                for k in ("Colour", "Color", "Culoare"):
-                    v = specifications.get(k)
-                    if v:
-                        colors = [str(v).strip()]
-                        break
-
-            if not colors:
-                # 2) din textul paginii (foarte robust)
-                detected = _extract_colour_from_text(text_for_color)
-                if detected:
-                    colors = [detected]
-
-            print("XD DEBUG detected_color =", colors[0] if colors else None)
-            print("XD DEBUG colors_final =", colors)
-st.info(f"🎨 CULORI: {len(colors)} = {colors}")
+                # 2) din textul vizibil (după "Item no." este adesea culoarea pe linia următoare)
+                try:
+                    t = self.driver.execute_script(
+                        "return document.body.innerText.substring(0, 8000);"
+                    ) or ""
+                    m = re.search(r"Item no\.\s*[A-Z0-9\.]+\s*\n([A-Za-z][A-Za-z \-]{2,40})\n", t)
+                    if m:
+                        colors = [m.group(1).strip()]
+                    if not colors:
+                        m2 = re.search(r"\bColour\b\s*[:\t ]+\s*([^\n\r\t]+)", t, flags=re.IGNORECASE)
+                        if m2:
+                            val = m2.group(1).strip()
+                            val = re.split(r"\s{2,}|\t|•|\|", val)[0].strip()
+                            if 1 <= len(val) <= 40:
+                                colors = [val]
+                except Exception:
+                    pass
+            st.info(f"🎨 CULORI: {len(colors)} = {colors}")
 
             # ═══ IMAGINI ═══
             images = []
