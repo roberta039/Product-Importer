@@ -1,14 +1,15 @@
 # scrapers/xdconnects.py
-# XD Connects Scraper v5.2 (no-tab-click, robust)
+# XD Connects Scraper v5.3 (no-tab-click, robust)
 # Goals:
 # - Stay on product page (avoid mis-click navigation)
-# - Extract Description + Specifications reliably from page text/HTML
+# - Extract Description + Specifications reliably from page text/HTML (including hidden DOM)
 # - Color fallback (from specs or raw text)
 # - Images extraction
+# - Robust price extraction
 
 import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import streamlit as st
 from bs4 import BeautifulSoup
@@ -19,10 +20,11 @@ from scrapers.base_scraper import BaseScraper
 from utils.helpers import clean_price
 from utils.image_handler import make_absolute_url
 
-XD_SCRAPER_VERSION = "2026-02-17-xd-v5.2-no-tab-click"
+XD_SCRAPER_VERSION = "2026-02-17-xd-v5.3-no-tab-click"
 
 
 def _specs_to_dict(specs: Any) -> Dict[str, str]:
+    """Normalize specs to dict (supports dict or list of (k,v))."""
     if isinstance(specs, dict):
         return {str(k).strip(): str(v).strip() for k, v in specs.items()}
     d: Dict[str, str] = {}
@@ -57,60 +59,51 @@ def _extract_colour_from_text(raw_text: str) -> Optional[str]:
     return None
 
 
-def _parse_product_details_from_text(raw_text: str) -> (str, Dict[str, str]):
+def _parse_product_details_from_text(raw_text: str) -> Tuple[str, Dict[str, str]]:
     """
     Parse the 'Product details' section from body text.
-    Works even when Product details is rendered as plain text (common on XD pages).
+    Works when Product details is rendered as plain text.
     Returns (description_text, specs_dict).
     """
     if not raw_text:
         return "", {}
 
-    # Focus around Product details if present
     txt = raw_text
-    # Keep a slice starting at "Product details" if available to reduce noise
     idx = txt.lower().find("product details")
     if idx != -1:
-        txt = txt[idx: idx + 8000]
+        txt = txt[idx: idx + 12000]
 
-    # Normalize: replace multiple spaces, keep newlines
     txt = txt.replace("\r", "\n")
     txt = re.sub(r"[ \t]+\n", "\n", txt)
     txt = re.sub(r"\n{3,}", "\n\n", txt).strip()
 
     specs: Dict[str, str] = {}
-
-    # Pattern: lines like "Key\tValue" or "Key  Value"
-    # We'll scan line by line and also handle multi-line values (e.g., Product USPs list)
     lines = [ln.strip() for ln in txt.split("\n") if ln.strip()]
+
+    def _is_key_value_line(s: str) -> bool:
+        return bool(re.match(r"^[A-Za-z].{0,45}\s{2,}.+$", s) or re.match(r"^[A-Za-z].{0,45}\t+.+$", s))
+
     i = 0
     while i < len(lines):
         ln = lines[i]
 
-        # stop if we hit footer-ish areas
         if ln.lower() in {"login", "register", "privacy policy"}:
             break
 
-        # Detect a key that is followed by a value on same line separated by tab(s) or multiple spaces
-        m = re.match(r"^([A-Za-z][A-Za-z0-9 \-/®™’']{1,40})\s{2,}(.+)$", ln)
-        if not m:
-            m = re.match(r"^([A-Za-z][A-Za-z0-9 \-/®™’']{1,40})\t+(.+)$", ln)
-
+        # key  value (2+ spaces) or key\tvalue
+        m = re.match(r"^([A-Za-z][A-Za-z0-9 \-/®™’']{1,60})\s{2,}(.+)$", ln) or \
+            re.match(r"^([A-Za-z][A-Za-z0-9 \-/®™’']{1,60})\t+(.+)$", ln)
         if m:
             key = m.group(1).strip()
             val = m.group(2).strip()
-            # handle Product USPs: may continue on next lines until next key-ish line
+
             if key.lower() == "product usps":
-                vals = []
-                if val:
-                    vals.append(val)
+                vals = [val] if val else []
                 j = i + 1
                 while j < len(lines):
                     nxt = lines[j]
-                    # heuristically: a new key line often contains a tab or 2+ spaces; also "Primary specifications"
-                    if re.match(r"^[A-Za-z].{0,45}\s{2,}.+$", nxt) or re.match(r"^[A-Za-z].{0,45}\t+.+$", nxt) or nxt.lower() in {"primary specifications", "description"}:
+                    if _is_key_value_line(nxt) or nxt.lower() in {"primary specifications", "description"}:
                         break
-                    # skip headings
                     if nxt.lower() in {"product details", "primary specifications"}:
                         j += 1
                         continue
@@ -125,22 +118,19 @@ def _parse_product_details_from_text(raw_text: str) -> (str, Dict[str, str]):
             continue
 
         # Headings
-        if ln.lower() in {"primary specifications"}:
+        if ln.lower() in {"product details", "primary specifications"}:
             i += 1
             continue
 
-        # Sometimes Description is "Description <text>" on one line without tabs
+        # Description line without separator
         if ln.lower().startswith("description"):
             desc = ln[len("description"):].strip(" :\t")
             if not desc:
-                # maybe next line(s) contain desc until next key
                 vals = []
                 j = i + 1
                 while j < len(lines):
                     nxt = lines[j]
-                    if re.match(r"^[A-Za-z].{0,45}\s{2,}.+$", nxt) or re.match(r"^[A-Za-z].{0,45}\t+.+$", nxt):
-                        break
-                    if nxt.lower() in {"product usps", "primary specifications"}:
+                    if _is_key_value_line(nxt) or nxt.lower() in {"product usps", "primary specifications"}:
                         break
                     vals.append(nxt)
                     j += 1
@@ -154,12 +144,10 @@ def _parse_product_details_from_text(raw_text: str) -> (str, Dict[str, str]):
 
         i += 1
 
-    description_text = specs.get("Description", "")
-    return description_text, specs
+    return specs.get("Description", ""), specs
 
 
-
-def _parse_product_details_from_html(soup: BeautifulSoup) -> (str, Dict[str, str]):
+def _parse_product_details_from_html(soup: BeautifulSoup) -> Tuple[str, Dict[str, str]]:
     """
     Parse product details from HTML without clicking tabs.
     Works even if the content is hidden (display:none) because we read the DOM.
@@ -177,7 +165,7 @@ def _parse_product_details_from_html(soup: BeautifulSoup) -> (str, Dict[str, str
             if len(cells) >= 2:
                 k = cells[0].get_text(" ", strip=True)
                 v = cells[1].get_text(" ", strip=True)
-                if k and v and len(k) <= 60:
+                if k and v and len(k) <= 80:
                     specs[k.strip()] = v.strip()
 
     # 2) definition lists
@@ -188,25 +176,23 @@ def _parse_product_details_from_html(soup: BeautifulSoup) -> (str, Dict[str, str
                 continue
             k = dt.get_text(" ", strip=True)
             v = dd.get_text(" ", strip=True)
-            if k and v and len(k) <= 60:
+            if k and v and len(k) <= 80:
                 specs[k.strip()] = v.strip()
 
-    # 3) generic 2-column rows (div/span)
-    known_keys = {"Description", "Item no.", "Product USPs", "Primary specifications", "CO2-eq", "Colour", "Color"}
-    for key in list(known_keys):
-        node = soup.find(lambda tag: tag.name in {"div","span","p","strong","th","td"} and tag.get_text(" ", strip=True) == key)
-        if node and key not in specs:
-            cand = node.find_next_sibling()
-            if not cand:
-                cand = node.find_next()
+    # 3) targeted keys
+    for key in ["Description", "Item no.", "Product USPs", "CO2-eq", "Colour", "Color"]:
+        if key in specs:
+            continue
+        node = soup.find(lambda tag: tag.name in {"div", "span", "p", "strong", "th", "td"} and tag.get_text(" ", strip=True) == key)
+        if node:
+            cand = node.find_next_sibling() or node.find_next()
             if cand:
                 v = cand.get_text(" ", strip=True)
                 v = re.sub(r"\s{2,}", " ", v).strip()
                 if v and v.lower() != key.lower():
                     specs[key] = v
 
-    desc = specs.get("Description", "")
-    return desc, specs
+    return specs.get("Description", ""), specs
 
 
 class XDConnectsScraper(BaseScraper):
@@ -289,6 +275,7 @@ class XDConnectsScraper(BaseScraper):
                 pass
 
             self._dismiss_cookie_banner()
+
             # submit
             for sel in ["form button[type='submit']", "button[type='submit']"]:
                 try:
@@ -311,16 +298,16 @@ class XDConnectsScraper(BaseScraper):
     def _looks_like_product_page(self, body_text: str, page_source: str) -> bool:
         t = (body_text or "").lower()
         s = (page_source or "").lower()
-        return ("item no." in t) or ("item no." in s) or ("from" in t and "price" in t and "€" in t)
+        return ("item no." in t) or ("item no." in s) or (("price" in t) and ("€" in t))
 
-    def scrape(self, url: str) -> dict | None:
+    def scrape(self, url: str) -> Optional[dict]:
         try:
             self._login_if_needed()
             self._init_driver()
             if not self.driver:
                 return None
 
-            st.info(f"📦 XD v5.2: {url[:70]}...")
+            st.info(f"📦 XD v5.3: {url[:70]}...")
             self.driver.get(url)
             time.sleep(6)
             self._dismiss_cookie_banner()
@@ -333,7 +320,7 @@ class XDConnectsScraper(BaseScraper):
             except Exception:
                 pass
 
-            # Small scroll to trigger lazy content without aggressive clicks
+            # small scroll for lazy assets
             for frac in [0.35, 0.8, 0.0]:
                 try:
                     self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight*arguments[0]);", frac)
@@ -341,14 +328,13 @@ class XDConnectsScraper(BaseScraper):
                     pass
                 time.sleep(0.7)
 
-            # Optional screenshot
             try:
                 ss = self.driver.get_screenshot_as_png()
                 st.image(ss, caption="XD pagina produs", width=700)
             except Exception:
                 pass
 
-            # Get raw text + HTML
+            # raw text + html
             try:
                 raw_text = self.driver.execute_script("return document.body.innerText || '';") or ""
             except Exception:
@@ -357,7 +343,6 @@ class XDConnectsScraper(BaseScraper):
             page_source = self.driver.page_source or ""
             soup = BeautifulSoup(page_source, "html.parser")
 
-            # If we got redirected to a non-product page, retry once (sometimes session/cookies settle)
             if not self._looks_like_product_page(raw_text, page_source):
                 print("XD WARNING: page does not look like product page, retrying once...")
                 self.driver.get(url)
@@ -366,7 +351,7 @@ class XDConnectsScraper(BaseScraper):
                 try:
                     raw_text = self.driver.execute_script("return document.body.innerText || '';") or ""
                 except Exception:
-                    raw_text = raw_text or ""
+                    pass
                 page_source = self.driver.page_source or ""
                 soup = BeautifulSoup(page_source, "html.parser")
 
@@ -379,7 +364,6 @@ class XDConnectsScraper(BaseScraper):
             h1 = soup.select_one("h1")
             name = h1.get_text(strip=True) if h1 else ""
             if not name:
-                # fallback: first non-empty title-ish line
                 for ln in (raw_text or "").split("\n"):
                     ln = ln.strip()
                     if ln and len(ln) < 120:
@@ -394,7 +378,6 @@ class XDConnectsScraper(BaseScraper):
             if im:
                 sku = im.group(1).upper()
             if not sku:
-                # try from url variantId first
                 vm = re.search(r"variantId=([A-Z0-9.]+)", url, re.IGNORECASE)
                 if vm:
                     sku = vm.group(1).upper()
@@ -403,7 +386,7 @@ class XDConnectsScraper(BaseScraper):
                 if sm:
                     sku = sm.group(1).upper()
 
-            # Price
+            # Price (robust)
             price = 0.0
             currency = "EUR"
             try:
@@ -412,41 +395,40 @@ class XDConnectsScraper(BaseScraper):
                     const body = document.body.innerText || '';
                     const res = {price:'', currency:''};
 
-                    // Prefer explicit 'Price' line if present
+                    // Prefer explicit 'Price €73.8' line if present
                     let m = body.match(/\bPrice\b\s*€\s*(\d{1,6}(?:[\.,]\d{1,2})?)/i);
                     if (m) { res.price=m[1]; res.currency='EUR'; return res; }
 
-                    // Or 'From Price €73.8' style
-                    m = body.match(/\bFrom\b[\s\S]{0,40}?\bPrice\b\s*€\s*(\d{1,6}(?:[\.,]\d{1,2})?)/i);
+                    // Or 'From' block
+                    m = body.match(/\bFrom\b[\s\S]{0,60}?\bPrice\b\s*€\s*(\d{1,6}(?:[\.,]\d{1,2})?)/i);
                     if (m) { res.price=m[1]; res.currency='EUR'; return res; }
 
                     // Or standalone euro amount '€ 73,80'
                     m = body.match(/€\s*(\d{1,6}(?:[\.,]\d{1,2})?)/);
                     if (m) { res.price=m[1]; res.currency='EUR'; return res; }
 
-                    // RON format
+                    // RON
                     m = body.match(/(\d{1,6}(?:[\.,]\d{1,2})?)\s*RON/i);
                     if (m) { res.price=m[1]; res.currency='RON'; return res; }
 
                     return res;
                     """
                 )
-if price_info and price_info.get("price"):
+                if price_info and price_info.get("price"):
                     price = clean_price(str(price_info.get("price")))
-                    currency = price_info.get("currency", "EUR")
+                    currency = price_info.get("currency", "EUR") or "EUR"
             except Exception:
                 pass
 
             st.info(f"💰 PREȚ: {price} {currency}")
 
             # Product details:
-            # 1) Try HTML (includes hidden DOM), 2) then raw_text (visible text fallback)
             description_text, specifications = _parse_product_details_from_html(soup)
 
             if not specifications:
                 description_text, specifications = _parse_product_details_from_text(raw_text)
 
-            # If still empty, last-chance: pull textContent from DOM via JS (even if hidden)
+            # last-chance: textContent from DOM even if hidden
             if not specifications:
                 try:
                     dom_text = self.driver.execute_script(
@@ -458,12 +440,11 @@ if price_info and price_info.get("price"):
                             if (!t) return false;
                             return (t.includes('Description') && t.includes('Item no.')) ||
                                    (t.includes('Product USPs') && t.includes('Description')) ||
-                                   (t.includes('Primary specifications') && t.includes('CO2'));
+                                   (t.includes('Primary specifications') && (t.includes('CO2') || t.includes('CO2-eq')));
                           })
                           .slice(0, 25)
                           .map(e => (e.textContent||'').trim())
-                          .join('
-');
+                          .join('\\n');
                         return hits;
                         """
                     ) or ""
@@ -475,28 +456,25 @@ if price_info and price_info.get("price"):
                 except Exception:
                     pass
 
-            # normalize: ensure dict
-            if isinstance(specifications, list):
-                specifications = _specs_to_dict(specifications)
-
-            # Always include Item no.
+            specifications = _specs_to_dict(specifications)
 
             if sku and "Item no." not in specifications:
                 specifications["Item no."] = sku
 
+            # Build description HTML
             description = f"<p>{description_text}</p>" if description_text else ""
-            st.info(f"📝 DESC: {len(description)} car")
+            st.info(f"📝 DESC: {len(description_text)} car")
             st.info(f"📋 SPECS: {len(specifications)}")
 
             # Colors
-            specs_dict = _specs_to_dict(specifications)
             detected_color = None
             for key in ("Colour", "Color", "Culoare"):
-                if key in specs_dict and specs_dict[key]:
-                    detected_color = specs_dict[key].strip()
+                if key in specifications and specifications[key]:
+                    detected_color = specifications[key].strip()
                     break
             if not detected_color:
                 detected_color = _extract_colour_from_text(raw_text)
+
             colors = [detected_color] if detected_color else []
             st.info(f"🎨 CULORI: {len(colors)} = {colors}")
 
@@ -511,21 +489,19 @@ if price_info and price_info.get("price"):
                         continue
                     images.append(make_absolute_url(src, self.base_url))
 
-                # background-image
                 for el in soup.select("*[style*='background-image']"):
                     style = el.get("style", "")
                     m = re.search(r"background-image\s*:\s*url\(['\"]?([^'\")]+)", style)
                     if m:
                         images.append(make_absolute_url(m.group(1), self.base_url))
 
-                # de-dup keep order
                 seen = set()
-                images2 = []
+                out = []
                 for u in images:
                     if u not in seen:
                         seen.add(u)
-                        images2.append(u)
-                images = images2
+                        out.append(u)
+                images = out
             except Exception:
                 pass
 
