@@ -635,6 +635,69 @@ class XDConnectsScraper(BaseScraper):
             except Exception as e:
                 st.warning(f"⚠️ CULORI: {str(e)[:50]}")
 
+            # Fallback 1: current colour from specifications (Primary specifications)
+            if not colors and specifications:
+                for k in [
+                    'Colour', 'Color', 'Culoare', 'Farbe',
+                    'Primary specifications Colour',
+                ]:
+                    v = specifications.get(k)
+                    if v:
+                        c = str(v).strip()
+                        if c and c not in colors:
+                            colors.append(c)
+                            color_variants.append({
+                                'name': c,
+                                'url': url,
+                                'image': '',
+                                'color_code': '',
+                                'variant_id': '',
+                            })
+                        break
+
+            # Fallback 2: try read selected colour from the UI near the "Colour:" label
+            if not colors:
+                try:
+                    csel = self.driver.execute_script(
+                        """
+                        function norm(s){return (s||'').replace(/\s+/g,' ').trim();}
+                        const body = document.body;
+                        if (!body) return '';
+                        // Find the label node that contains 'Colour:'
+                        const nodes = Array.from(body.querySelectorAll('span,div,label,p'))
+                          .filter(n => /\bcolour\b\s*:?/i.test(norm(n.innerText)));
+                        for (const n of nodes){
+                          // Common pattern: label then a value near it
+                          const p = n.parentElement;
+                          if (!p) continue;
+                          const txt = norm(p.innerText);
+                          // e.g. "Colour: light blue" or "Colour:\nlight blue"
+                          const m = txt.match(/\bcolour\b\s*:?(?:\s|\n)+([a-z0-9\- ]{2,40})/i);
+                          if (m) return norm(m[1]);
+                          // Or a selected swatch button with aria-label
+                          const sel = p.querySelector('[aria-current=\"true\"],[aria-selected=\"true\"],button.selected,.selected');
+                          if (sel){
+                            const a = norm(sel.getAttribute('aria-label')||sel.getAttribute('title')||sel.innerText);
+                            if (a) return a;
+                          }
+                        }
+                        return '';
+                        """
+                    )
+                    if csel:
+                        csel = str(csel).strip()
+                        if csel and csel not in colors:
+                            colors.append(csel)
+                            color_variants.append({
+                                'name': csel,
+                                'url': url,
+                                'image': '',
+                                'color_code': '',
+                                'variant_id': '',
+                            })
+                except Exception:
+                    pass
+
             st.info(f"🎨 CULORI: {len(colors)} = {colors}")
 
             # ═══ IMAGINI ═══
