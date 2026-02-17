@@ -1,9 +1,8 @@
 # scrapers/xdconnects.py
-# VERSIUNE 3.0 - cu debug fortat
-# Ultima actualizare: fix pret, descriere, culori, imagini Large
+# VERSIUNE 4.0 - fix regex JS, culori, imagini
 """
-Scraper pentru xdconnects.com
-Fix: pret, descriere, specificatii, culori, imagini Large
+Scraper XD Connects v4.0
+Fix: regex JS, culori Images, imagini 0
 """
 import re
 import time
@@ -46,16 +45,15 @@ class XDConnectsScraper(BaseScraper):
             except NoSuchElementException:
                 continue
         try:
-            self.driver.execute_script("""
-                ['#CybotCookiebotDialog',
-                 '#CybotCookiebotDialogBodyUnderlay'
-                ].forEach(function(s){
-                    document.querySelectorAll(s).forEach(
-                        function(el){el.remove();}
-                    );
-                });
-                document.body.style.overflow='auto';
-            """)
+            self.driver.execute_script(
+                "var s=['#CybotCookiebotDialog',"
+                "'#CybotCookiebotDialogBodyUnderlay'];"
+                "s.forEach(function(x){"
+                "document.querySelectorAll(x)"
+                ".forEach(function(e){e.remove();});"
+                "});"
+                "document.body.style.overflow='auto';"
+            )
         except Exception:
             pass
 
@@ -143,35 +141,22 @@ class XDConnectsScraper(BaseScraper):
             if not self.driver:
                 return None
 
-            # ═══ VERSIUNE 3.0 DEBUG ═══
-            st.info(f"📦 XD v3.0: Scrapez {url[:70]}...")
+            st.info(f"📦 XD v4.0: {url[:70]}...")
             self.driver.get(url)
             time.sleep(6)
             self._dismiss_cookie_banner()
             time.sleep(2)
 
-            # Scroll complet
-            self.driver.execute_script(
-                "window.scrollTo(0, "
-                "document.body.scrollHeight/3);"
-            )
-            time.sleep(1)
-            self.driver.execute_script(
-                "window.scrollTo(0, "
-                "document.body.scrollHeight/2);"
-            )
-            time.sleep(1)
-            self.driver.execute_script(
-                "window.scrollTo(0, "
-                "document.body.scrollHeight);"
-            )
-            time.sleep(1)
-            self.driver.execute_script(
-                "window.scrollTo(0, 0);"
-            )
-            time.sleep(1)
+            # Scroll
+            for frac in ['0.3', '0.5', '0.8', '1', '0']:
+                self.driver.execute_script(
+                    "window.scrollTo(0, "
+                    "document.body.scrollHeight * "
+                    + frac + ");"
+                )
+                time.sleep(0.8)
 
-            # Click pe tab-uri description/specifications
+            # Click tab-uri
             try:
                 tabs = self.driver.find_elements(
                     By.CSS_SELECTOR,
@@ -207,72 +192,69 @@ class XDConnectsScraper(BaseScraper):
                 name = h1.get_text(strip=True)
             if not name:
                 name = "Produs XD Connects"
-            st.info(f"📋 XD NUME: {name}")
+            st.info(f"📋 NUME: {name}")
 
             # ═══ SKU ═══
             sku = ""
-            item_match = re.search(
+            im = re.search(
                 r'Item\s*no\.?\s*:?\s*([A-Z0-9.]+)',
                 page_source, re.IGNORECASE
             )
-            if item_match:
-                sku = item_match.group(1).upper()
+            if im:
+                sku = im.group(1).upper()
             if not sku:
-                sm = re.search(r'([pP]\d{3}\.\d{2,3})', url)
+                sm = re.search(
+                    r'([pP]\d{3}\.\d{2,3})', url
+                )
                 if sm:
                     sku = sm.group(1).upper()
-            st.info(f"📋 XD SKU: {sku}")
 
             # ═══ PREȚ ═══
             price = 0.0
             try:
-                price_result = self.driver.execute_script("""
-                    var body = document.body.innerText;
-                    var m = body.match(
-                        /(?:From\\s+)?(\\d{1,5}[.,]\\d{2})\\s*RON/i
-                    );
-                    if (m) return m[1];
-
-                    var els = document.querySelectorAll(
-                        '[class*="price"], .price'
-                    );
-                    for (var i = 0; i < els.length; i++) {
-                        var t = els[i].innerText.trim();
-                        var pm = t.match(/(\\d{1,5}[.,]\\d{2})/);
-                        if (pm) return pm[1];
-                    }
-                    return '';
-                """)
-                if price_result:
-                    price = clean_price(str(price_result))
-            except Exception as e:
-                st.warning(f"⚠️ XD PREȚ JS err: {str(e)[:50]}")
-
+                pr = self.driver.execute_script(
+                    "var b=document.body.innerText;"
+                    "var m=b.match("
+                    "/(?:From\\\\s+)?(\\\\d{1,5}[.,]\\\\d{2})"
+                    "\\\\s*RON/i);"
+                    "if(m)return m[1];"
+                    "var e=document.querySelectorAll("
+                    "'[class*=\"price\"]');"
+                    "for(var i=0;i<e.length;i++){"
+                    "var t=e[i].innerText;"
+                    "var p=t.match(/(\\\\d{1,5}[.,]\\\\d{2})/);"
+                    "if(p)return p[1];}"
+                    "return '';"
+                )
+                if pr:
+                    price = clean_price(str(pr))
+            except Exception:
+                pass
             if price <= 0:
                 pm = re.search(
                     r'(\d{1,5}[.,]\d{2})\s*RON',
-                    page_source, re.IGNORECASE
+                    page_source
                 )
                 if pm:
                     price = clean_price(pm.group(1))
-            st.info(f"💰 XD PREȚ: {price} RON")
+            st.info(f"💰 PREȚ: {price} RON")
 
             # ═══ DESCRIERE ═══
             description = ""
             try:
-                desc_result = self.driver.execute_script("""
+                dr = self.driver.execute_script("""
                     var result = '';
-
-                    // 1. Container description
                     var sels = [
                         '[class*="description"]',
                         '[class*="detail-desc"]',
                         '#description',
                         '.tab-pane.active',
-                        '[class*="product-info"]',
+                        '[class*="product-info"]'
                     ];
                     for (var i = 0; i < sels.length; i++) {
-                        var els = document.querySelectorAll(sels[i]);
+                        var els = document.querySelectorAll(
+                            sels[i]
+                        );
                         for (var j = 0; j < els.length; j++) {
                             var t = els[j].innerText.trim();
                             if (t.length > 30 &&
@@ -285,46 +267,32 @@ class XDConnectsScraper(BaseScraper):
                         }
                         if (result.length > 80) break;
                     }
-
-                    // 2. Bullet points sub produs
-                    if (result.length < 30) {
-                        var body = document.body.innerText;
-                        var bm = body.match(
-                            /([\\w]+\\s*[•●]\\s*[^\\n]{10,500})/
-                        );
-                        if (bm) result = bm[1];
-                    }
-
-                    // 3. Paragrafele
                     if (result.length < 30) {
                         var ps = document.querySelectorAll('p');
-                        var texts = [];
+                        var arr = [];
                         for (var k = 0; k < ps.length; k++) {
                             var pt = ps[k].innerText.trim();
                             if (pt.length > 20 &&
                                 pt.length < 500 &&
                                 pt.indexOf('Cookie') === -1 &&
-                                pt.indexOf('Accept') === -1 &&
                                 pt.indexOf('Login') === -1) {
-                                texts.push(pt);
+                                arr.push(pt);
                             }
                         }
-                        if (texts.length > 0) {
-                            result = texts.join(' ');
+                        if (arr.length > 0) {
+                            result = arr.join(' ');
                         }
                     }
-
                     return result;
                 """)
-                if desc_result and len(str(desc_result)) > 15:
-                    raw = str(desc_result).strip()
+                if dr and len(str(dr)) > 15:
+                    raw = str(dr).strip()
                     lines = raw.split('\n')
                     clean = []
                     for line in lines:
                         line = line.strip()
                         if (
-                            line
-                            and len(line) > 5
+                            line and len(line) > 5
                             and 'cookie' not in line.lower()
                             and 'accept' not in line.lower()
                             and 'login' not in line.lower()
@@ -335,16 +303,13 @@ class XDConnectsScraper(BaseScraper):
                             clean.append(line)
                     if clean:
                         description = (
-                            '<p>'
-                            + '</p>\n<p>'.join(clean[:10])
-                            + '</p>'
+                            '<p>' +
+                            '</p><p>'.join(clean[:10]) +
+                            '</p>'
                         )
             except Exception as e:
-                st.warning(
-                    f"⚠️ XD DESC JS err: {str(e)[:50]}"
-                )
+                st.warning(f"⚠️ DESC err: {str(e)[:50]}")
 
-            # Fallback meta description
             if not description or len(description) < 30:
                 meta = soup.select_one(
                     'meta[name="description"]'
@@ -352,9 +317,8 @@ class XDConnectsScraper(BaseScraper):
                 if meta:
                     mc = meta.get('content', '')
                     if mc and len(mc) > 15:
-                        description = f"<p>{mc}</p>"
+                        description = '<p>' + mc + '</p>'
 
-            # Fallback text produs
             if not description or len(description) < 30:
                 tm = re.search(
                     r'((?:rPET|PVC|recycled|anti.?theft|'
@@ -364,30 +328,31 @@ class XDConnectsScraper(BaseScraper):
                 )
                 if tm:
                     description = (
-                        f"<p>{tm.group(1).strip()}</p>"
+                        '<p>' + tm.group(1).strip() + '</p>'
                     )
 
-            st.info(
-                f"📝 XD DESC: {len(description)} caractere"
-            )
+            st.info(f"📝 DESC: {len(description)} car")
 
             # ═══ SPECIFICAȚII ═══
             specifications = {}
             try:
-                spec_result = self.driver.execute_script("""
+                sp = self.driver.execute_script("""
                     var specs = {};
-
-                    // 1. Tabele
-                    var tables = document.querySelectorAll('table');
+                    var tables = document.querySelectorAll(
+                        'table'
+                    );
                     for (var t = 0; t < tables.length; t++) {
-                        var rows = tables[t].querySelectorAll('tr');
+                        var rows = tables[t].querySelectorAll(
+                            'tr'
+                        );
                         for (var r = 0; r < rows.length; r++) {
-                            var cells = rows[r].querySelectorAll(
-                                'td, th'
-                            );
+                            var cells = rows[r]
+                                .querySelectorAll('td, th');
                             if (cells.length >= 2) {
-                                var k = cells[0].innerText.trim();
-                                var v = cells[1].innerText.trim();
+                                var k = cells[0]
+                                    .innerText.trim();
+                                var v = cells[1]
+                                    .innerText.trim();
                                 if (k && v &&
                                     k.length < 50 &&
                                     v.length < 300 &&
@@ -398,205 +363,152 @@ class XDConnectsScraper(BaseScraper):
                                 }
                             }
                         }
-                        if (Object.keys(specs).length > 0) break;
+                        if (Object.keys(specs).length > 0)
+                            break;
                     }
-
-                    // 2. dt/dd
                     if (Object.keys(specs).length === 0) {
-                        var dts = document.querySelectorAll('dt');
-                        var dds = document.querySelectorAll('dd');
-                        var len = Math.min(
+                        var dts = document.querySelectorAll(
+                            'dt'
+                        );
+                        var dds = document.querySelectorAll(
+                            'dd'
+                        );
+                        var n = Math.min(
                             dts.length, dds.length
                         );
-                        for (var i = 0; i < len; i++) {
-                            var k = dts[i].innerText.trim();
-                            var v = dds[i].innerText.trim();
-                            if (k && v && k.length < 50) {
-                                specs[k] = v;
+                        for (var i = 0; i < n; i++) {
+                            var dk = dts[i].innerText.trim();
+                            var dv = dds[i].innerText.trim();
+                            if (dk && dv && dk.length < 50) {
+                                specs[dk] = dv;
                             }
                         }
                     }
-
-                    // 3. Text "rPET • Volume 10.5L • ..."
-                    if (Object.keys(specs).length === 0) {
-                        var body = document.body.innerText;
-                        var dm = body.match(
-                            /((?:rPET|PVC|recycled|polyester)' +
-                            '\\s*[•●][^\\n]{10,300})/i
-                        );
-                        if (dm) {
-                            var items = dm[1].split(/[•●]/);
-                            for (var d = 0;
-                                 d < items.length; d++) {
-                                var item = items[d].trim();
-                                if (item && item.length > 2) {
-                                    specs['Feature ' +
-                                        (d+1)] = item;
-                                }
-                            }
-                        }
-                    }
-
                     return specs;
                 """)
-                if (
-                    spec_result
-                    and isinstance(spec_result, dict)
-                ):
-                    specifications = spec_result
+                if sp and isinstance(sp, dict):
+                    specifications = sp
             except Exception as e:
-                st.warning(
-                    f"⚠️ XD SPEC JS err: {str(e)[:50]}"
-                )
+                st.warning(f"⚠️ SPEC err: {str(e)[:50]}")
 
-            # Fallback specs din regex
+            # Fallback: regex pe bullet text
             if not specifications:
-                dm = re.search(
+                bm = re.search(
                     r'((?:rPET|PVC|recycled|anti.?theft|'
-                    r'polyester)\s*[•●]\s*[^<\n]{10,300})',
+                    r'polyester)\s*'
+                    + r'[\u2022\u25CF•●]'
+                    + r'\s*[^\n<]{10,300})',
                     page_source, re.IGNORECASE
                 )
-                if dm:
-                    items = re.split(r'[•●]', dm.group(1))
-                    for i, item in enumerate(items):
-                        item = item.strip()
-                        if item and len(item) > 2:
+                if bm:
+                    parts = re.split(
+                        r'[\u2022\u25CF•●]', bm.group(1)
+                    )
+                    for i, p in enumerate(parts):
+                        p = p.strip()
+                        if p and len(p) > 2:
                             specifications[
-                                f'Caracteristică {i+1}'
-                            ] = item
+                                'Feature ' + str(i+1)
+                            ] = p
 
             st.info(
-                f"📋 XD SPECS: {len(specifications)} "
-                f"({list(specifications.keys())[:3]})"
+                f"📋 SPECS: {len(specifications)} "
+                f"= {list(specifications.items())[:3]}"
             )
 
             # ═══ CULORI ═══
             colors = []
             color_variants = []
             try:
-                color_result = self.driver.execute_script("""
+                cr = self.driver.execute_script("""
                     var results = [];
+                    var links = document.querySelectorAll(
+                        'a[href*="variantId"]'
+                    );
 
-                    // Căutăm "Colour:" section
-                    var all = document.querySelectorAll('*');
-                    var section = null;
-                    for (var i = 0; i < all.length; i++) {
-                        var t = all[i].childNodes;
-                        for (var c = 0; c < t.length; c++) {
-                            if (t[c].nodeType === 3 &&
-                                t[c].textContent.trim()
-                                    .match(/^Colou?r:?$/i)) {
-                                section = all[i].parentElement;
+                    links.forEach(function(el) {
+                        var name = (
+                            el.getAttribute('title') ||
+                            el.getAttribute('aria-label') ||
+                            ''
+                        ).trim();
+
+                        var href =
+                            el.getAttribute('href') || '';
+                        var vm = href.match(
+                            /variantId=([A-Z0-9.]+)/i
+                        );
+                        var vid = vm ?
+                            vm[1].toUpperCase() : '';
+
+                        if (!name && vid) name = vid;
+
+                        // Dimensiunea elementului
+                        var rect = el.getBoundingClientRect();
+                        var isSmall = (
+                            rect.width < 80 &&
+                            rect.height < 80 &&
+                            rect.width > 5 &&
+                            rect.height > 5
+                        );
+
+                        // Filtrare strictă
+                        var bad = [
+                            'Add', 'add', 'cart', 'Cart',
+                            'ORDER', 'order', 'Images',
+                            'images', 'coș', 'Adăugați',
+                            'rucsac', 'Rucsac', 'Bobby',
+                            'bobby', 'backpack', 'Backpack',
+                            'Hero', 'hero', 'Small', 'small',
+                            'Anti', 'anti', 'theft', 'MORE',
+                            'more', 'MEDIA', 'media',
+                            'Download', 'download'
+                        ];
+
+                        var isBad = false;
+                        for (var b = 0; b < bad.length; b++) {
+                            if (name.indexOf(bad[b]) !== -1) {
+                                isBad = true;
                                 break;
                             }
                         }
-                        if (section) break;
-                    }
 
-                    // Fallback: căutăm label-ul
-                    if (!section) {
-                        var labels = document.querySelectorAll(
-                            'label, span, div'
+                        // Acceptăm doar elementele mici
+                        // (swatches de culoare) SAU cu nume
+                        // scurt de culoare
+                        var isColor = (
+                            !isBad &&
+                            name.length > 0 &&
+                            name.length < 25 &&
+                            (isSmall || name.length < 15)
                         );
-                        for (var i = 0; i < labels.length; i++) {
-                            var lt = labels[i].textContent.trim();
-                            if (lt.match(/^Colou?r:?$/i)) {
-                                section =
-                                    labels[i].parentElement;
-                                break;
+
+                        if (isColor) {
+                            var exists = false;
+                            for (var r = 0;
+                                 r < results.length; r++) {
+                                if (results[r].name === name) {
+                                    exists = true;
+                                    break;
+                                }
+                            }
+                            if (!exists) {
+                                results.push({
+                                    name: name,
+                                    href: href,
+                                    vid: vid,
+                                    w: rect.width,
+                                    h: rect.height
+                                });
                             }
                         }
-                    }
-
-                    if (section) {
-                        var links = section.querySelectorAll(
-                            'a[href*="variantId"]'
-                        );
-                        links.forEach(function(el) {
-                            var name = (
-                                el.getAttribute('title') ||
-                                el.getAttribute('aria-label') ||
-                                ''
-                            ).trim();
-                            var href =
-                                el.getAttribute('href') || '';
-                            var vm = href.match(
-                                /variantId=([A-Z0-9.]+)/i
-                            );
-                            var vid = vm ?
-                                vm[1].toUpperCase() : '';
-
-                            if (!name && vid) name = vid;
-
-                            if (name && name.length < 25 &&
-                                name.indexOf('Add') === -1 &&
-                                name.indexOf('Adăugați') === -1 &&
-                                name.indexOf('cart') === -1 &&
-                                name.indexOf('coș') === -1) {
-                                results.push({
-                                    name: name,
-                                    href: href,
-                                    vid: vid
-                                });
-                            }
-                        });
-                    }
-
-                    // Fallback: toate linkurile variantId
-                    if (results.length === 0) {
-                        var allLinks = document.querySelectorAll(
-                            'a[href*="variantId"]'
-                        );
-                        allLinks.forEach(function(el) {
-                            var name = (
-                                el.getAttribute('title') ||
-                                el.getAttribute('aria-label') ||
-                                ''
-                            ).trim();
-                            var href =
-                                el.getAttribute('href') || '';
-                            var vm = href.match(
-                                /variantId=([A-Z0-9.]+)/i
-                            );
-                            var vid = vm ?
-                                vm[1].toUpperCase() : '';
-
-                            if (!name && vid) name = vid;
-
-                            // FILTRU STRICT:
-                            // exclus butoane add to cart
-                            var isColorSwatch = (
-                                name.length < 25 &&
-                                name.indexOf('Add') === -1 &&
-                                name.indexOf('Adăugați') === -1 &&
-                                name.indexOf('cart') === -1 &&
-                                name.indexOf('coș') === -1 &&
-                                name.indexOf('ORDER') === -1 &&
-                                name.indexOf('rucsac') === -1 &&
-                                name.indexOf('Bobby') === -1 &&
-                                name.indexOf('backpack') === -1
-                            );
-
-                            if (name && isColorSwatch &&
-                                !results.some(
-                                    function(r){
-                                        return r.name === name;
-                                    }
-                                )) {
-                                results.push({
-                                    name: name,
-                                    href: href,
-                                    vid: vid
-                                });
-                            }
-                        });
-                    }
+                    });
 
                     return results;
                 """)
 
-                if color_result:
-                    for item in color_result:
+                if cr:
+                    for item in cr:
                         c = item.get('name', '').strip()
                         if c and c not in colors:
                             colors.append(c)
@@ -614,52 +526,87 @@ class XDConnectsScraper(BaseScraper):
                                     'vid', ''
                                 ),
                             })
-
             except Exception as e:
                 st.warning(
-                    f"⚠️ XD CULORI err: {str(e)[:50]}"
+                    f"⚠️ CULORI err: {str(e)[:50]}"
                 )
 
             st.info(
-                f"🎨 XD CULORI: {len(colors)} = "
-                f"{colors[:5]}"
+                f"🎨 CULORI: {len(colors)} = {colors[:6]}"
             )
 
-            # ═══ IMAGINI (Large) ═══
+            # ═══ IMAGINI ═══
             images = []
             try:
-                img_result = self.driver.execute_script("""
+                ir = self.driver.execute_script("""
                     var results = [];
-                    var imgs = document.querySelectorAll('img');
-                    imgs.forEach(function(img) {
+                    var imgs = document.querySelectorAll(
+                        'img'
+                    );
+                    for (var i = 0; i < imgs.length; i++) {
                         var src =
-                            img.getAttribute('data-src') ||
-                            img.getAttribute('src') || '';
-                        if (src &&
-                            src.indexOf('xdconnects.com') > -1 &&
+                            imgs[i].getAttribute('data-src') ||
+                            imgs[i].getAttribute('src') || '';
+
+                        // Verificăm dimensiunea
+                        var rect = imgs[i]
+                            .getBoundingClientRect();
+                        var isBig = (
+                            rect.width > 50 ||
+                            rect.height > 50
+                        );
+
+                        if (src.length > 10 && isBig &&
                             src.indexOf('ProductImages') > -1 &&
                             src.indexOf('icon') === -1 &&
                             src.indexOf('logo') === -1 &&
                             src.indexOf('flag') === -1 &&
                             src.indexOf('co2') === -1 &&
-                            src.indexOf('badge') === -1) {
-                            // Small -> Large
+                            src.indexOf('badge') === -1 &&
+                            src.indexOf('pixel') === -1) {
+
                             var large = src
                                 .replace('/Small/', '/Large/')
                                 .replace('/Thumb/', '/Large/')
                                 .replace('/Medium/', '/Large/');
+
                             if (results.indexOf(large) === -1) {
                                 results.push(large);
                             }
                         }
-                    });
+                    }
+
+                    // Fallback: orice img mare cu xdconnects
+                    if (results.length === 0) {
+                        for (var i = 0; i < imgs.length; i++) {
+                            var src =
+                                imgs[i].getAttribute('data-src') ||
+                                imgs[i].getAttribute('src') || '';
+                            var rect = imgs[i]
+                                .getBoundingClientRect();
+
+                            if (src.length > 10 &&
+                                rect.width > 30 &&
+                                rect.height > 30 &&
+                                (src.indexOf('xdconnects') > -1 ||
+                                 src.indexOf('static') > -1) &&
+                                src.indexOf('icon') === -1 &&
+                                src.indexOf('logo') === -1) {
+                                if (results.indexOf(src) === -1) {
+                                    results.push(src);
+                                }
+                            }
+                        }
+                    }
+
                     return results;
                 """)
-                if img_result:
-                    images = img_result
-            except Exception:
-                pass
+                if ir:
+                    images = ir
+            except Exception as e:
+                st.warning(f"⚠️ IMG err: {str(e)[:50]}")
 
+            # Fallback imagini din soup
             if not images:
                 for img in soup.select('img'):
                     src = (
@@ -667,25 +614,32 @@ class XDConnectsScraper(BaseScraper):
                         or img.get('src')
                         or ''
                     )
-                    if (
-                        src
-                        and 'ProductImages' in src
-                        and 'icon' not in src.lower()
-                        and 'logo' not in src.lower()
-                    ):
-                        large = (
-                            src.replace('/Small/', '/Large/')
-                            .replace('/Thumb/', '/Large/')
-                        )
-                        abs_url = make_absolute_url(
-                            large, self.base_url
-                        )
-                        if abs_url not in images:
-                            images.append(abs_url)
+                    if src and len(src) > 10:
+                        if (
+                            'xdconnects' in src
+                            or 'static' in src
+                        ):
+                            if (
+                                'icon' not in src.lower()
+                                and 'logo' not in src.lower()
+                                and 'co2' not in src.lower()
+                            ):
+                                large = (
+                                    src.replace(
+                                        '/Small/', '/Large/'
+                                    ).replace(
+                                        '/Thumb/', '/Large/'
+                                    )
+                                )
+                                abs_url = make_absolute_url(
+                                    large, self.base_url
+                                )
+                                if abs_url not in images:
+                                    images.append(abs_url)
 
-            st.info(f"📸 XD IMG: {len(images)} imagini")
+            st.info(f"📸 IMG: {len(images)} imagini")
 
-            # ═══ BUILD PRODUCT ═══
+            # ═══ BUILD ═══
             product = self._build_product(
                 name=name,
                 sku=sku,
@@ -703,16 +657,14 @@ class XDConnectsScraper(BaseScraper):
             product['variant_images'] = {}
 
             st.success(
-                f"✅ XD: {name[:30]} | "
-                f"Preț:{price} | "
-                f"Desc:{len(description)}c | "
-                f"Spec:{len(specifications)} | "
-                f"Cul:{len(colors)} | "
-                f"Img:{len(images)}"
+                f"✅ {name[:30]} | P:{price} | "
+                f"D:{len(description)} | "
+                f"S:{len(specifications)} | "
+                f"C:{len(colors)} | I:{len(images)}"
             )
 
             return product
 
         except Exception as e:
-            st.error(f"❌ XD error: {str(e)}")
+            st.error(f"❌ XD: {str(e)}")
             return None
