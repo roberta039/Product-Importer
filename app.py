@@ -6,6 +6,7 @@ Pasul 2: Generare CSV/Excel compatibil Gomag + import
 """
 import io
 import json
+import re
 import time
 import pandas as pd
 import streamlit as st
@@ -649,13 +650,11 @@ if st.session_state.step == 1:
                     'Preț Final LEI': p.get('final_price', 0),
                     'Stoc': p.get('stock', 1),
                     'Culori': ', '.join(p.get('colors', [])),
-                    'Nr Variante': len(
-                        p.get('color_variants', [])
-                    ),
+                    'Descriere': re.sub(r'<[^>]+>', '', p.get('description', '') or '').strip(),
+                    'Specificatii': json.dumps(p.get('specifications', {}) or {}, ensure_ascii=False),
+                    'Nr Variante': len(p.get('color_variants', [])),
                     'Nr Imagini': len(p.get('images', [])),
-                    'Imagini': ' | '.join(
-                        p.get('images', [])[:5]
-                    ),
+                    'Imagini': ' | '.join(p.get('images', [])[:10]),
                     'Sursă': p.get('source_url', ''),
                     'Site': p.get('source_site', ''),
                 })
