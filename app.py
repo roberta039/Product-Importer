@@ -6,6 +6,95 @@ Pasul 2: Generare CSV/Excel compatibil Gomag + import
 """
 import io
 import json
+
+# --- GOMAG EXPORT (parent + variants by color) ---
+GOMAG_IMPORT_HEADERS = ['Cod Produs (SKU)', 'Cod EAN', 'Cod Grupa', 'Varianta principala', 'Denumire Produs', 'Descriere Produs', 'Descriere Scurta a Produsului', 'URL Poza de Produs', 'URL Video', 'Pozitie in Listari', 'Produse Cross-Sell', 'Produse Up-Sell', 'Descriere pt feed-uri', 'Atribute: Culoare (variante de produs)', 'Cuvinte Cautare', 'Pret', 'Produs: Descriere GEO', 'Produs: Cantitate Totala', 'Produs: Unitatea de Masura pentru Cantitatea Totala', 'Produs: Cantitate Unitara', 'Produs: Unitate de Masura pentru Cantitatea Unitara', 'Pret Special', 'Produs: Durata de Livrare', 'Produs: Tip Durata de Livrare', 'Produs: Cantitate Maxima', 'Produs: Unitate de masura', 'Produs: Cod extern', 'Pret de Achizitie', 'Produs: Tag postari', 'Produs: Produs digital', 'Produs: Data ultimei modificari de pret', 'Produs: Cota TVA diferita pentru persoanele juridice', 'Pretul Include TVA', 'Produs: Cota TVA persoane juridice', 'Produs: Informatii siguranta produs', 'Cota TVA', 'Moneda', 'Stoc Cantitativ', 'Completare Stoc Cantitativ', 'Stare Stoc', 'Gestioneaza Automat Stocul', 'Se Aduce la Comanda', 'Cantitate Minima', 'Increment de Cantitate', 'Greutate (Kg)', 'Activ in Magazin', 'Activ in Magazin de la data de', 'Activ in Magazin pana la data de', 'Categorie / Categorii', 'Marca (Brand)', 'Titlu Meta', 'Descriere Meta', 'Cuvinte Cheie', 'Titlul Imaginii Principale', 'Url', 'Link Canonical', 'Id Produs']
+
+def _xd_parent_sku_from_variant(sku: str) -> str:
+    # P705.709 -> P705.70 ; P705.711 -> P705.71
+    if not sku:
+        return ""
+    m = re.match(r"^(P\d+\.\d)\d$", sku.strip(), flags=re.IGNORECASE)
+    return m.group(1) if m else sku.strip()
+
+def _first_image(product: dict) -> str:
+    imgs = product.get("images") or product.get("image_urls") or []
+    if isinstance(imgs, str):
+        return imgs
+    return imgs[0] if imgs else ""
+
+def build_gomag_import_rows(products: list[dict], category_path: str = "", brand: str = "") -> list[dict]:
+    # Group by parent SKU (only special-cased for XD Pxxx.xxx variants)
+    groups = {}
+    for p in products:
+        sku = (p.get("sku") or "").strip()
+        parent = p.get("parent_sku") or _xd_parent_sku_from_variant(sku)
+        group_key = parent or sku or (p.get("name") or "produs")
+        groups.setdefault(group_key, []).append(p)
+
+    rows = []
+    for group_key, items in groups.items():
+        # choose parent candidate: first item
+        first = items[0]
+        parent_sku = group_key
+        product_name = first.get("name") or first.get("title") or ""
+        desc = first.get("description") or first.get("description_html") or ""
+        # parent row
+        parent_row = {h: "" for h in GOMAG_IMPORT_HEADERS}
+        parent_row["Cod Produs (SKU)"] = parent_sku
+        parent_row["Cod Grupa"] = parent_sku
+        parent_row["Varianta principala"] = 1
+        parent_row["Denumire Produs"] = product_name
+        parent_row["Descriere Produs"] = desc
+        parent_row["URL Poza de Produs"] = _first_image(first)
+        parent_row["Pret"] = 1  # user said not important now; must be non-empty for import
+        parent_row["Moneda"] = "RON"
+        parent_row["Stoc Cantitativ"] = 1
+        parent_row["Activ in Magazin"] = 1
+        if category_path:
+            parent_row["Categorie / Categorii"] = category_path
+        if brand:
+            parent_row["Marca (Brand)"] = brand
+        rows.append(parent_row)
+
+        # variant rows
+        for it in items:
+            vrow = {h: "" for h in GOMAG_IMPORT_HEADERS}
+            vrow["Cod Produs (SKU)"] = (it.get("sku") or "").strip() or parent_sku
+            vrow["Cod Grupa"] = parent_sku
+            vrow["Varianta principala"] = 0
+            vrow["Denumire Produs"] = product_name
+            vrow["URL Poza de Produs"] = _first_image(it) or _first_image(first)
+            # attribute color (single)
+            colors = it.get("colors") or it.get("colours") or []
+            if isinstance(colors, str):
+                colors = [colors]
+            color = colors[0] if colors else (it.get("color") or "")
+            vrow["Atribute: Culoare (variante de produs)"] = color
+            vrow["Pret"] = 1
+            vrow["Moneda"] = "RON"
+            vrow["Stoc Cantitativ"] = 1
+            vrow["Activ in Magazin"] = 1
+            if category_path:
+                vrow["Categorie / Categorii"] = category_path
+            if brand:
+                vrow["Marca (Brand)"] = brand
+            rows.append(vrow)
+    return rows
+
+def make_gomag_import_xlsx(products: list[dict], category_path: str = "", brand: str = "") -> bytes:
+    rows = build_gomag_import_rows(products, category_path=category_path, brand=brand)
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Import"
+    ws.append(GOMAG_IMPORT_HEADERS)
+    for r in rows:
+        ws.append([r.get(h, "") for h in GOMAG_IMPORT_HEADERS])
+    from io import BytesIO
+    bio = BytesIO()
+    wb.save(bio)
+    return bio.getvalue()
+# --- END GOMAG EXPORT ---
 import time
 import pandas as pd
 import streamlit as st
@@ -573,7 +662,9 @@ if st.session_state.step == 1:
 
                     new_desc = st.text_area(
                         "Editează descrierea:",
-                        value=product.get('description') or product.get('description_html') or '',
+                        value=product.get(
+                            'description', ''
+                        )[:500],
                         height=100,
                         key=f"desc_{idx}",
                     )
@@ -585,7 +676,8 @@ if st.session_state.step == 1:
                         sp[idx]['name'] = new_name
                         sp[idx]['final_price'] = new_price
                         sp[idx]['sku'] = new_sku
-                        sp[idx]['description'] = new_desc
+                        if new_desc:
+                            sp[idx]['description'] = new_desc
                         st.success("✅ Modificări salvate!")
                         st.rerun()
 
@@ -642,7 +734,7 @@ if st.session_state.step == 1:
                     'Nume': p.get('name', ''),
                     'SKU': p.get('sku', ''),
                     'Descriere': p.get('description', '') or p.get('description_html', ''),
-                    'Specificații': json.dumps(p.get('specifications', p.get('specs', {})) or {}, ensure_ascii=False),
+                    'Specificații': json.dumps(p.get('specs', {}), ensure_ascii=False),
                     
                     'Preț Original': p.get('original_price', 0),
                     'Moneda': p.get('currency', 'EUR'),
@@ -656,7 +748,7 @@ if st.session_state.step == 1:
                     'Imagini': ' | '.join(
                         p.get('images', [])[:5]
                     ),
-                    'Sursă': p.get('source_url', '') or p.get('source_site', '') or p.get('source_url', ''),
+                    'Sursă': p.get('source_url', ''),
                     'Site': p.get('source_site', ''),
                 })
             df_export = pd.DataFrame(export_data)
@@ -1068,3 +1160,21 @@ st.markdown(
     "</div>",
     unsafe_allow_html=True,
 )
+
+
+# --- Gomag template export ---
+st.markdown("### Export Gomag (produs părinte + variante pe culoare)")
+gomag_category_path = st.text_input("Categorie / Categorii (ex: Accesorii > Rucsacuri antifurt)", value="")
+gomag_brand = st.text_input("Marca (Brand)", value="")
+if st.session_state.get("products"):
+    gomag_bytes = make_gomag_import_xlsx(st.session_state["products"], category_path=gomag_category_path, brand=gomag_brand)
+    st.download_button(
+        "Descarcă fișier import Gomag (template)",
+        data=gomag_bytes,
+        file_name="gomag_import.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        width="stretch",
+    )
+else:
+    st.info("Nu există produse extrase încă. Rulează extragerea, apoi exportă pentru Gomag.")
+# --- end ---
