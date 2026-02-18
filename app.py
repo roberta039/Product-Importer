@@ -183,7 +183,7 @@ if st.session_state.step == 1:
                     f"✅ Fișier încărcat: {len(df)} rânduri, "
                     f"{len(df.columns)} coloane"
                 )
-                st.dataframe(df.head(10), use_container_width=True)
+                st.dataframe(df.head(10), width='stretch')
 
                 # Selectăm coloana cu URL-uri
                 url_column = st.selectbox(
@@ -641,25 +641,25 @@ if st.session_state.step == 1:
         with col_exp2:
             export_data = []
             for p in st.session_state.scraped_products:
-                # Keep export focused on Step 1 verification fields
-                specs = p.get('specifications', {}) or {}
-                try:
-                    specs_json = json.dumps(specs, ensure_ascii=False)
-                except Exception:
-                    specs_json = str(specs)
-
                 export_data.append({
                     'Nume': p.get('name', ''),
                     'SKU': p.get('sku', ''),
-                    'Preț Final LEI': p.get('final_price', 0),
+                    'Descriere': p.get('description', '') or p.get('description_html', ''),
+                    'Specificații': json.dumps(p.get('specs', {}), ensure_ascii=False),
+                    
+                    'Preț Original': p.get('original_price', 0),
                     'Moneda': p.get('currency', 'EUR'),
+                    'Preț Final LEI': p.get('final_price', 0),
+                    'Stoc': p.get('stock', 1),
                     'Culori': ', '.join(p.get('colors', [])),
-                    'Descriere': p.get('description', ''),
-                    'Specificații (JSON)': specs_json,
-                    'Nr Variante': len(p.get('color_variants', []) or []),
-                    'Nr Imagini': len(p.get('images', []) or []),
-                    'Imagini (primele 10)': ' | '.join((p.get('images', []) or [])[:10]),
-                    'URL Sursă': p.get('source_url', ''),
+                    'Nr Variante': len(
+                        p.get('color_variants', [])
+                    ),
+                    'Nr Imagini': len(p.get('images', [])),
+                    'Imagini': ' | '.join(
+                        p.get('images', [])[:5]
+                    ),
+                    'Sursă': p.get('source_url', ''),
                     'Site': p.get('source_site', ''),
                 })
             df_export = pd.DataFrame(export_data)
@@ -819,7 +819,7 @@ elif st.session_state.step == 2:
 
     edited_df = st.data_editor(
         df_display,
-        use_container_width=True,
+        width='stretch',
         num_rows="fixed",
         column_config={
             "Import": st.column_config.CheckboxColumn(
@@ -916,7 +916,7 @@ elif st.session_state.step == 2:
             f"📥 Generează CSV Gomag "
             f"({len(final_products)} produse)",
             type="primary",
-            use_container_width=True,
+            width='stretch',
             disabled=len(final_products) == 0,
         ):
             csv_bytes = importer.generate_csv_file(
@@ -957,7 +957,7 @@ elif st.session_state.step == 2:
                 ]
                 st.dataframe(
                     df_preview[available_cols],
-                    use_container_width=True,
+                    width='stretch',
                 )
 
     elif import_method == "Descarcă Excel":
@@ -965,7 +965,7 @@ elif st.session_state.step == 2:
             f"📥 Generează Excel Gomag "
             f"({len(final_products)} produse)",
             type="primary",
-            use_container_width=True,
+            width='stretch',
             disabled=len(final_products) == 0,
         ):
             excel_bytes = importer.generate_excel_file(
@@ -998,7 +998,7 @@ elif st.session_state.step == 2:
             f"🚀 Upload CSV automat "
             f"({len(final_products)} produse)",
             type="primary",
-            use_container_width=True,
+            width='stretch',
             disabled=len(final_products) == 0,
         ):
             csv_bytes = importer.generate_csv_file(
