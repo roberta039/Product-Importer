@@ -1,380 +1,338 @@
 # scrapers/xdconnects.py
-# VERSIUNE 5.0.2 - compatibil BaseScraper (fara get_driver in Base),
-# fix pret EUR cu 1-2 zecimale, descriere/specs stabile, culoare curenta
+"""
+XD Connects scraper (variants by color)
+
+Goals:
+- Extract description + specifications reliably from HTML (even when tabs hide content).
+- Discover ALL color variants for a product, and return a LIST of product dicts (one per variant).
+- Works with this project's BaseScraper (scrapers/base_scraper.py). Does NOT require get_driver().
+"""
 
 import re
 import time
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+
 from bs4 import BeautifulSoup
-import streamlit as st
-from selenium.webdriver.common.by import By
-from selenium.common.exceptions import NoSuchElementException
 
 from scrapers.base_scraper import BaseScraper
-from utils.helpers import clean_price
 from utils.image_handler import make_absolute_url
 
 
+_VARIANT_ID_RE = re.compile(r"variantId=([A-Za-z0-9\.\-]+)")
+# filenames like: p705.70__p705.709__5001.jpg  -> capture p705.709
+_FILE_VARIANT_RE = re.compile(r"__([pP]\d+\.\d{3})__")
+
+
+def _norm_variant(v: str) -> str:
+    v = (v or "").strip()
+    if not v:
+        return ""
+    # normalize p705.709 -> P705.709
+    if v[0].lower() == "p":
+        return "P" + v[1:]
+    return v.upper()
+
+
+def _extract_parent_from_url(url: str) -> str:
+    """
+    From ...-p705.70?variantId=P705.709 -> P705.70
+    """
+    m = re.search(r"-p(\d+\.\d+)", url, flags=re.IGNORECASE)
+    if not m:
+        return ""
+    return "P" + m.group(1)
+
+
+def _set_variant_in_url(url: str, variant_id: str) -> str:
+    pr = urlparse(url)
+    qs = parse_qs(pr.query)
+    qs["variantId"] = [variant_id]
+    new_query = urlencode(qs, doseq=True)
+    return urlunparse((pr.scheme, pr.netloc, pr.path, pr.params, new_query, pr.fragment))
+
+
+def _get_body_text(soup: BeautifulSoup) -> str:
+    # For hidden/tab content, soup.get_text() can still include it.
+    return soup.get_text("\n", strip=True)
+
+
+def _extract_color_from_text(text: str) -> str:
+    """
+    Prefer:
+      Item no. P705.709\nlight blue\n
+    Fallback:
+      Colour\tlight blue
+    """
+    if not text:
+        return ""
+
+    m = re.search(r"Item no\.\s*[A-Z0-9\.]+\s*\n([A-Za-z][A-Za-z \-]{2,40})\n", text)
+    if m:
+        return m.group(1).strip()
+
+    m = re.search(r"\bColour\b\s*[:\t ]+\s*([^\n\r\t]+)", text, flags=re.IGNORECASE)
+    if m:
+        val = m.group(1).strip()
+        val = re.split(r"\s{2,}|\t|•|\|", val)[0].strip()
+        if 1 <= len(val) <= 40:
+            return val
+    return ""
+
+
+def _extract_description_and_specs(soup: BeautifulSoup) -> tuple[str, dict]:
+    """
+    Looks for a 'Product details' table-like section where rows are Key/Value.
+    We keep a dict of specs and extract the 'Description' field as description.
+    """
+    specs: dict[str, str] = {}
+    desc = ""
+
+    # Many XD pages contain key/value rows in any <table> or <dl> inside "Product details"
+    # We'll parse ALL tables and dl blocks and then pick the best keys.
+    # TABLES
+    for table in soup.find_all("table"):
+        for tr in table.find_all("tr"):
+            cells = tr.find_all(["th", "td"])
+            if len(cells) >= 2:
+                k = cells[0].get_text(" ", strip=True)
+                v = cells[1].get_text(" ", strip=True)
+                if k and v:
+                    specs[k] = v
+
+    # DL blocks
+    for dl in soup.find_all("dl"):
+        dts = dl.find_all("dt")
+        dds = dl.find_all("dd")
+        for dt, dd in zip(dts, dds):
+            k = dt.get_text(" ", strip=True)
+            v = dd.get_text(" ", strip=True)
+            if k and v:
+                specs[k] = v
+
+    # Description key variants
+    for k in list(specs.keys()):
+        if k.lower() in ("description", "descriere"):
+            desc = specs.get(k, "") or desc
+
+    return desc, specs
+
+
+def _extract_images(soup: BeautifulSoup, base_url: str) -> list[str]:
+    urls = set()
+
+    for img in soup.find_all("img"):
+        src = (img.get("src") or "").strip()
+        if src and not src.startswith("data:"):
+            urls.add(make_absolute_url(src, base_url))
+
+    # background-image urls
+    for tag in soup.find_all(style=True):
+        style = tag.get("style") or ""
+        m = re.findall(r"url\(['\"]?(.*?)['\"]?\)", style, flags=re.IGNORECASE)
+        for u in m:
+            u = u.strip()
+            if u and not u.startswith("data:"):
+                urls.add(make_absolute_url(u, base_url))
+
+    # anchors to images
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        if any(href.lower().endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".webp")):
+            urls.add(make_absolute_url(href, base_url))
+
+    return sorted(urls)
+
+
+def _discover_variant_ids_from_html(html: str) -> list[str]:
+    if not html:
+        return []
+    vids = set()
+
+    for m in _VARIANT_ID_RE.finditer(html):
+        vids.add(_norm_variant(m.group(1)))
+
+    for m in _FILE_VARIANT_RE.finditer(html):
+        vids.add(_norm_variant(m.group(1)))
+
+    # sanity filter: keep only Pxxx.xxx (at least one dot)
+    vids = {v for v in vids if v.startswith("P") and "." in v and len(v) >= 6}
+    return sorted(vids)
+
+
 class XDConnectsScraper(BaseScraper):
+    name = "xdconnects"
+
     def __init__(self):
         super().__init__()
-        self.name = "xdconnects"
-        self.base_url = "https://www.xdconnects.com"
         self._logged_in = False
 
-    # --- compat helper (unele versiuni de cod apeleaza get_driver) ---
-    def get_driver(self):
-        self._init_driver()
-        return self.driver
-
-    def _dismiss_cookie_banner(self):
-        if not self.driver:
+    def _ensure_login(self):
+        # Uses existing BaseScraper login utilities if present, otherwise does nothing.
+        # We keep this minimal; the user already has XD creds in secrets.
+        if self._logged_in:
             return
-        for sel in [
-            "#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll",
-            "#CybotCookiebotDialogBodyButtonAccept",
-        ]:
-            try:
-                btn = self.driver.find_element(By.CSS_SELECTOR, sel)
-                if btn.is_displayed():
-                    self.driver.execute_script("arguments[0].click();", btn)
-                    time.sleep(1.5)
-                    return
-            except NoSuchElementException:
-                continue
-            except Exception:
-                continue
-        # fallback: elimina overlay
+
+        username = self._get_secret("SOURCES", "XD_USER")
+        password = self._get_secret("SOURCES", "XD_PASS")
+        if not username or not password:
+            # no creds, skip
+            self._logged_in = True
+            return
+
+        self._init_driver()
+        driver = self.driver
+
+        # If already logged in, skip
         try:
-            self.driver.execute_script(
-                "var s=['#CybotCookiebotDialog','#CybotCookiebotDialogBodyUnderlay'];"
-                "s.forEach(function(x){document.querySelectorAll(x).forEach(function(e){e.remove();});});"
-                "document.body.style.overflow='auto';"
-            )
+            # quick heuristic: account menu present
+            driver.get("https://www.xdconnects.com/en-gb/login")
+            time.sleep(2)
         except Exception:
             pass
 
-    def _login_if_needed(self):
-        if self._logged_in:
-            return
         try:
-            xd_user = st.secrets.get("SOURCES", {}).get("XD_USER", "")
-            xd_pass = st.secrets.get("SOURCES", {}).get("XD_PASS", "")
-            if not xd_user or not xd_pass:
-                self._logged_in = True
-                return
-
-            self._init_driver()
-            if not self.driver:
-                self._logged_in = True
-                return
-
-            st.info("🔐 XD: Mă conectez...")
-            self.driver.get(self.base_url + "/en-gb/profile/login")
-            time.sleep(4)
-            self._dismiss_cookie_banner()
-
-            # email
-            email_selectors = [
-                "input[type='email'][name='email']",
-                "input[name='email']",
-                "input[type='email']",
-            ]
-            email_filled = False
-            for sel in email_selectors:
-                try:
-                    for f in self.driver.find_elements(By.CSS_SELECTOR, sel):
-                        if f.is_displayed() and f.is_enabled():
-                            f.clear()
-                            f.send_keys(xd_user)
-                            email_filled = True
-                            break
-                    if email_filled:
-                        break
-                except Exception:
-                    continue
-
-            # pass
-            try:
-                for f in self.driver.find_elements(By.CSS_SELECTOR, "input[type='password']"):
-                    if f.is_displayed() and f.is_enabled():
-                        f.clear()
-                        f.send_keys(xd_pass)
-                        break
-            except Exception:
-                pass
-
-            self._dismiss_cookie_banner()
+            # Fill login form (best effort)
+            # XD uses standard fields often: input[type=email], input[type=password]
+            email_el = driver.find_element("css selector", "input[type='email'], input[name*='email' i], input[id*='email' i]")
+            pass_el = driver.find_element("css selector", "input[type='password']")
+            email_el.clear()
+            email_el.send_keys(username)
+            pass_el.clear()
+            pass_el.send_keys(password)
 
             # submit
-            for sel in ["form button[type='submit']", "button[type='submit']"]:
-                try:
-                    for btn in self.driver.find_elements(By.CSS_SELECTOR, sel):
-                        if btn.is_displayed() and btn.is_enabled():
-                            self.driver.execute_script("arguments[0].click();", btn)
-                            raise StopIteration
-                except StopIteration:
-                    break
-                except Exception:
-                    continue
+            btn = driver.find_element("css selector", "button[type='submit'], button[name='login'], input[type='submit']")
+            btn.click()
+            time.sleep(3)
+        except Exception:
+            # If login page layout differs, ignore; sometimes product pages are accessible.
+            pass
 
-            time.sleep(5)
-            self._logged_in = True
-            st.success("✅ XD: Login reușit!")
-        except Exception as e:
-            st.warning(f"⚠️ XD login: {str(e)[:120]}")
-            self._logged_in = True
+        self._logged_in = True
 
-    @staticmethod
-    def _extract_price_from_text(text: str) -> float:
-        """Robust EUR extraction from visible text."""
-        if not text:
-            return 0.0
-        # prefer patterns with EUR/€ close by
-        patterns = [
-            r"Price\s*[€]\s*(\d{1,6}(?:[\.,]\d{1,2})?)",
-            r"From\s*\n?\s*Price\s*[€]\s*(\d{1,6}(?:[\.,]\d{1,2})?)",
-            r"[€]\s*(\d{1,6}(?:[\.,]\d{1,2})?)",
-            r"(\d{1,6}(?:[\.,]\d{1,2})?)\s*EUR\b",
-        ]
-        for p in patterns:
-            m = re.search(p, text, re.IGNORECASE)
+    def scrape(self, url: str):
+        """
+        Returns:
+          - list[dict] (one per color variant) when variants are discoverable
+          - dict for single variant
+        """
+        self._ensure_login()
+        self._init_driver()
+        driver = self.driver
+
+        driver.get(url)
+        time.sleep(2.5)
+
+        html = driver.page_source or ""
+        parent_sku = _extract_parent_from_url(url)
+        base_url = f"{urlparse(url).scheme}://{urlparse(url).netloc}"
+
+        variant_ids = _discover_variant_ids_from_html(html)
+        # Always include the requested variantId (if any)
+        qs = parse_qs(urlparse(url).query)
+        current_vid = _norm_variant((qs.get("variantId") or [""])[0])
+        if current_vid:
+            if current_vid not in variant_ids:
+                variant_ids.insert(0, current_vid)
+
+        # If we still only have 0/1 variant id, return single product dict
+        if len(variant_ids) <= 1:
+            return self._scrape_single_variant(url, parent_sku=parent_sku)
+
+        # Otherwise, scrape each variant (limit to avoid huge loops)
+        max_variants = 30
+        variant_ids = variant_ids[:max_variants]
+
+        products = []
+        for vid in variant_ids:
+            vurl = _set_variant_in_url(url, vid)
+            try:
+                p = self._scrape_single_variant(vurl, parent_sku=parent_sku, forced_sku=vid)
+                products.append(p)
+            except Exception as e:
+                # Keep going; return partial list
+                products.append({
+                    "name": "",
+                    "sku": vid,
+                    "parent_sku": parent_sku,
+                    "source_site": "xdconnects",
+                    "source_url": vurl,
+                    "description": "",
+                    "specifications": {},
+                    "colors": [],
+                    "images": [],
+                    "price_eur": 0.0,
+                    "error": str(e)[:200],
+                })
+
+        # Deduplicate by SKU (some pages repeat same vid)
+        seen = set()
+        uniq = []
+        for p in products:
+            sku = (p.get("sku") or "").strip()
+            if sku and sku in seen:
+                continue
+            if sku:
+                seen.add(sku)
+            uniq.append(p)
+        return uniq
+
+    def _scrape_single_variant(self, url: str, parent_sku: str = "", forced_sku: str = "") -> dict:
+        self._init_driver()
+        driver = self.driver
+        driver.get(url)
+        time.sleep(2.5)
+
+        html = driver.page_source or ""
+        soup = BeautifulSoup(html, "html.parser")
+        text = _get_body_text(soup)
+
+        # name
+        title = ""
+        # Often the h1 contains product name
+        h1 = soup.find(["h1", "h2"])
+        if h1:
+            title = h1.get_text(" ", strip=True)
+        if not title:
+            # fallback: first strong-ish title in text
+            title = (text.split("\n")[0] if text else "").strip()
+
+        desc, specs = _extract_description_and_specs(soup)
+
+        # If description still empty, try to find a "Description" label in body text
+        if not desc:
+            m = re.search(r"\bDescription\b\s+(.{40,2000})", text, flags=re.IGNORECASE | re.S)
             if m:
-                try:
-                    return clean_price(m.group(1))
-                except Exception:
-                    continue
-        return 0.0
+                desc = m.group(1).strip()
 
-    def scrape(self, url: str) -> dict | None:
-        # IMPORTANT: returnam mereu dict ca sa nu crape .get in app
+        # SKU / item no.
+        sku = forced_sku.strip() if forced_sku else ""
+        if not sku:
+            # try "Item no. P705.709" in text
+            m = re.search(r"Item no\.\s*([A-Z0-9\.]+)", text)
+            if m:
+                sku = _norm_variant(m.group(1))
+
+        if not sku:
+            # fallback: query param
+            qs = parse_qs(urlparse(url).query)
+            sku = _norm_variant((qs.get("variantId") or [""])[0])
+
+        color = _extract_color_from_text(text)
+        colors = [color] if color else []
+
+        images = _extract_images(soup, base_url=base_url)
+
         product = {
-            "name": "",
-            "sku": "",
-            "price": 0.0,
-            "currency": "EUR",
-            "description": "",
-            "specifications": {},
-            "colors": [],
-            "color_variants": [],
-            "images": [],
-            "url": url,
-            "source": "xdconnects",
-            "stock": 1,
+            "name": title,
+            "sku": sku,
+            "parent_sku": parent_sku or _extract_parent_from_url(url),
+            "source_site": "xdconnects",
+            "source_url": url,
+            "description": desc,
+            "specifications": specs or {},
+            "colors": colors,
+            "images": images,
+            "price_eur": 0.0,  # not required now
         }
-
-        try:
-            self._login_if_needed()
-            self._init_driver()
-            if not self.driver:
-                product["error"] = "Selenium driver not available"
-                return product
-
-            st.info(f"📦 XD v5.0.2: {url[:70]}...")
-            self.driver.get(url)
-            time.sleep(6)
-            self._dismiss_cookie_banner()
-            time.sleep(1)
-
-            # Scroll for lazy load
-            for frac in [0.25, 0.5, 0.85, 1.0, 0.0]:
-                try:
-                    self.driver.execute_script(
-                        "window.scrollTo(0, document.body.scrollHeight*arguments[0]);",
-                        frac,
-                    )
-                    time.sleep(0.6)
-                except Exception:
-                    pass
-
-            # screenshot debug (optional)
-            try:
-                ss = self.driver.get_screenshot_as_png()
-                st.image(ss, caption="XD pagina produs", width=700)
-            except Exception:
-                pass
-
-            page_source = self.driver.page_source or ""
-            soup = BeautifulSoup(page_source, "html.parser")
-
-            # visible text for debugging + price
-            visible_text = ""
-            try:
-                visible_text = self.driver.execute_script(
-                    "return document.body.innerText || '';"
-                )
-                st.text_area(
-                    "DEBUG: Text vizibil pe pagină",
-                    str(visible_text)[:2000],
-                    height=200,
-                )
-            except Exception:
-                visible_text = ""
-
-            # --- Name ---
-            h1 = soup.select_one("h1")
-            if h1:
-                product["name"] = h1.get_text(strip=True)
-            if not product["name"]:
-                product["name"] = "Produs XD Connects"
-
-            # --- SKU ---
-            sku = ""
-            m = re.search(r"Item\s*no\.?\s*: ?\s*([A-Z0-9.]+)", visible_text or page_source, re.IGNORECASE)
-            if m:
-                sku = m.group(1).upper()
-            if not sku:
-                m2 = re.search(r"variantId=([A-Z0-9.]+)", url, re.IGNORECASE)
-                if m2:
-                    sku = m2.group(1).upper()
-            if not sku:
-                m3 = re.search(r"([pP]\d{3}\.\d{2,3})", url)
-                if m3:
-                    sku = m3.group(1).upper()
-            product["sku"] = sku
-
-            # --- Price (EUR) ---
-            price_eur = 0.0
-            try:
-                # prefer visible text
-                price_eur = self._extract_price_from_text(visible_text)
-                if price_eur <= 0:
-                    # fallback to html
-                    price_eur = self._extract_price_from_text(page_source)
-            except Exception:
-                price_eur = 0.0
-
-            product["price"] = float(price_eur or 0.0)
-            product["currency"] = "EUR"
-            st.info(f"💰 PREȚ: {product['price']} {product['currency']}")
-
-            # --- Description + Specs: use HTML tables that contain 'Description' ---
-            description_text = ""
-            specs = {}
-
-            # find 'Product details' block by scanning for key rows
-            # Many XD pages render a table with rows: Item no., Description, Product USPs, Primary specifications...
-            for table in soup.select("table"):
-                rows = table.select("tr")
-                for row in rows:
-                    cells = [c.get_text(" ", strip=True) for c in row.select("th,td")]
-                    if len(cells) >= 2:
-                        k = cells[0].strip()
-                        v = cells[1].strip()
-                        if not k or not v:
-                            continue
-                        # skip price matrix rows
-                        if k.lower() in {"quantity", "printed*", "printed", "plain"}:
-                            continue
-                        if "€" in v or "eur" in v.lower() or "ron" in v.lower():
-                            # likely price grid
-                            continue
-                        # capture description
-                        if k.lower() in {"description", "descriere"} and len(v) > 30:
-                            description_text = v
-                        # specs
-                        if len(k) < 80 and len(v) < 500:
-                            specs[k] = v
-
-            # fallback: try definition lists
-            if not specs:
-                dts = soup.select("dt")
-                dds = soup.select("dd")
-                for dt, dd in zip(dts, dds):
-                    k = dt.get_text(" ", strip=True)
-                    v = dd.get_text(" ", strip=True)
-                    if not k or not v:
-                        continue
-                    if "€" in v or "eur" in v.lower() or "ron" in v.lower():
-                        continue
-                    specs[k] = v
-
-            # if still no description, use meta description
-            if not description_text:
-                meta = soup.select_one("meta[name='description']")
-                if meta:
-                    description_text = (meta.get("content") or "").strip()
-
-            # build html description
-            if description_text:
-                product["description"] = f"<p>{description_text}</p>"
-            else:
-                product["description"] = ""
-
-            # filter out unwanted keys
-            drop_keys = {
-                "Quantity",
-                "Printed*",
-                "Printed",
-                "Plain",
-                "Recommended sales price",
-                "Recommended sales price ",
-            }
-            specs_filtered = {}
-            for k, v in (specs or {}).items():
-                if k.strip() in drop_keys:
-                    continue
-                # also drop the explicit price-grid artifacts
-                if k.strip().lower() in {"cantitate", "imprimat*", "simplu"}:
-                    continue
-                specs_filtered[k] = v
-            product["specifications"] = specs_filtered
-
-            st.info(f"📝 DESC: {len(product['description'])} car")
-            st.info(f"📋 SPECS: {len(product['specifications'])} = {list(product['specifications'].items())[:3]}")
-
-            # --- Current color (robust) ---
-            color = ""
-            # try from specs
-            for key in ["Colour", "Color", "Culoare"]:
-                if key in specs_filtered:
-                    color = specs_filtered[key]
-                    break
-            if not color:
-                # from visible text after Item no.
-                mt = re.search(r"Item no\.\s*[A-Z0-9.]+\s*\n([A-Za-z][A-Za-z \-]{2,40})\n", visible_text or "")
-                if mt:
-                    color = mt.group(1).strip()
-            if color:
-                product["colors"] = [color]
-            st.info(f"🎨 CULORI: {len(product['colors'])} = {product['colors']}")
-
-            # --- Images ---
-            images = []
-            try:
-                # include images from HTML
-                for img in soup.select("img"):
-                    src = img.get("data-src") or img.get("src") or img.get("data-lazy") or ""
-                    if not src or len(src) < 10:
-                        continue
-                    if any(bad in src.lower() for bad in ["icon", "logo", "flag", "badge", "pixel", "svg", "data:"]):
-                        continue
-                    if any(good in src for good in ["/product/image/", "ProductImages", "/content/files/", "static.xd"]):
-                        full = make_absolute_url(src, self.base_url)
-                        if full not in images:
-                            images.append(full)
-
-                # background-image urls
-                if len(images) < 3:
-                    for el in soup.select("[style*='background']"):
-                        style = el.get("style") or ""
-                        m = re.search(r"url\(['\"]?([^'\"\)]+)", style)
-                        if not m:
-                            continue
-                        src = m.group(1)
-                        if any(good in src for good in ["/product/image/", "ProductImages", "static.xd"]):
-                            full = make_absolute_url(src, self.base_url)
-                            if full not in images:
-                                images.append(full)
-            except Exception:
-                pass
-
-            product["images"] = images
-
-            st.info(f"📸 Total img: {len(product['images'])}")
-
-            return product
-
-        except Exception as e:
-            product["error"] = str(e)
-            st.warning(f"⚠️ XD scrape error: {str(e)[:160]}")
-            return product
+        return product
