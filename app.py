@@ -25,10 +25,6 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Ensure session state
-if 'scraped_products' not in st.session_state:
-    st.session_state.scraped_products = []
-
 st.title("🎒 Import Produse Anti-Theft → Gomag.ro")
 st.markdown("---")
 
@@ -303,9 +299,6 @@ if st.session_state.step == 1:
                 try:
                     result = scraper.scrape(url)
 
-                    # Un scraper poate returna:
-                    # - dict (un produs)
-                    # - list[dict] (mai multe variante, ex: culori)
                     products_batch = []
                     if isinstance(result, list):
                         products_batch = [p for p in result if isinstance(p, dict)]
@@ -314,13 +307,12 @@ if st.session_state.step == 1:
 
                     if products_batch:
                         for pidx, product in enumerate(products_batch, start=1):
-                            # Traducere dacă e activată
                             if translate_option:
                                 status_text.text(f"🌍 Traduc {i + 1}/{total}... (variantă {pidx}/{len(products_batch)})")
                                 try:
                                     product = translate_product_data(product)
                                 except Exception as te:
-                                    st.warning(f"⚠️ Traducere eșuată: {str(te)[:80]}")
+                                    st.warning(f"⚠️ Traducere eșuată: {type(te).__name__}: {repr(te)}")
 
                             st.session_state.scraped_products.append(product)
 
@@ -339,20 +331,14 @@ if st.session_state.step == 1:
                     else:
                         with results_container:
                             st.warning(
-                                f"⚠️ [{i + 1}/{total}] "
-                                f"Nu am putut extrage: "
-                                f"{url[:80]}"
+                                f"⚠️ [{i + 1}/{total}] Nu am putut extrage: {url[:80]}"
                             )
                 except Exception as e:
                     with results_container:
                         st.error(
                             f"❌ [{i + 1}/{total}] "
-                            f"Eroare: {type(e).__name__}: {repr(e)}"
+                            f"Eroare: {str(e)[:100]}"
                         )
-                        with st.expander('Detalii eroare (traceback)'):
-                            import traceback
-                            st.code(traceback.format_exc())
-
 
                 # Delay între request-uri
                 time.sleep(2)
