@@ -9,6 +9,16 @@ import json
 import time
 import pandas as pd
 import streamlit as st
+import traceback as _traceback
+
+def render_exception(results_container, i, total, e):
+    """Show non-empty error + traceback in Streamlit."""
+    err_short = f"{type(e).__name__}: {repr(e)}"
+    with results_container:
+        st.error(f"❌ [{i + 1}/{total}] Eroare: {err_short}")
+        with st.expander("Detalii eroare (traceback)"):
+            st.code(_traceback.format_exc())
+
 from utils.helpers import match_scraper, format_product_for_display
 from utils.translator import translate_product_data
 from utils.image_handler import make_absolute_url
@@ -204,12 +214,7 @@ if st.session_state.step == 1:
                     st.session_state.urls_to_process = urls
 
             except Exception as e:
-                err_short = f"{type(e).__name__}: {repr(e)}"
-                with results_container:
-                    st.error(f"❌ [{i + 1}/{total}] Eroare: {err_short}")
-                    with st.expander("Detalii eroare (traceback)"):
-                        import traceback as _tb
-                        st.code(_tb.format_exc())
+                render_exception(results_container, i, total, e)
     with tab_manual:
         st.markdown("Introdu URL-urile (câte unul pe linie):")
 
@@ -347,15 +352,7 @@ if st.session_state.step == 1:
                             )
 
                 except Exception as e:
-                    with results_container:
-                        st.error(
-                            f"❌ [{i + 1}/{total}] "
-                            f"Eroare: {str(e)[:100]}"
-                        )
-
-                # Delay între request-uri
-                time.sleep(2)
-
+                    render_exception(results_container, i, total, e)
             # Închidem scraperele
             for scraper in active_scrapers.values():
                 try:
@@ -714,8 +711,7 @@ elif st.session_state.step == 2:
                     )
                     st.rerun()
             except Exception as e:
-                st.error(f"❌ Eroare citire JSON: {str(e)}")
-
+                render_exception(results_container, i, total, e)
         if st.button("⬅️ Înapoi la Pasul 1"):
             st.session_state.step = 1
             st.rerun()
@@ -742,8 +738,7 @@ elif st.session_state.step == 2:
                     )
                     st.rerun()
             except Exception as e:
-                st.error(f"❌ Eroare citire JSON: {str(e)}")
-
+                render_exception(results_container, i, total, e)
     st.markdown("---")
 
     # ---- CONFIGURARE IMPORT ----
