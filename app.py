@@ -297,50 +297,49 @@ if st.session_state.step == 1:
                 scraper = active_scrapers[scraper_name]
 
                 try:
-                    product_result = scraper.scrape(url)
+                    result = scraper.scrape(url)
 
-                    if product_result:
-                        products_batch = product_result if isinstance(product_result, list) else [product_result]
+                    # Un scraper poate returna:
+                    # - dict (un produs)
+                    # - list[dict] (mai multe variante, ex: culori)
+                    products_batch = []
+                    if isinstance(result, list):
+                        products_batch = [p for p in result if isinstance(p, dict)]
+                    elif isinstance(result, dict):
+                        products_batch = [result]
 
-                        for j, product in enumerate(products_batch):
+                    if products_batch:
+                        for pidx, product in enumerate(products_batch, start=1):
                             # Traducere dacă e activată
                             if translate_option:
-                                status_text.text(
-                                    f"🌍 Traduc {i + 1}/{total}..."
-                                )
+                                status_text.text(f"🌍 Traduc {i + 1}/{total}... (variantă {pidx}/{len(products_batch)})")
                                 try:
-                                    product = translate_product_data(
-                                        product
-                                    )
+                                    product = translate_product_data(product)
                                 except Exception as te:
-                                    st.warning(
-                                        f"⚠️ Traducere eșuată: "
-                                        f"{str(te)[:80]}"
-                                    )
+                                    st.warning(f"⚠️ Traducere eșuată: {str(te)[:80]}")
 
-                            st.session_state.scraped_products.append(
-                                product
-                            )
+                            st.session_state.scraped_products.append(product)
 
                             with results_container:
                                 colors_info = ""
                                 if product.get('colors'):
-                                    colors_info = (
-                                        f" | 🎨 "
-                                        f"{len(product['colors'])} culori"
-                                    )
-
-                                variant_info = ""
-                                if len(products_batch) > 1:
-                                    variant_info = f" | 🧩 variantă {j+1}/{len(products_batch)}"
+                                    colors_info = f" | 🎨 {len(product.get('colors'))} culori"
 
                                 st.success(
                                     f"✅ [{i + 1}/{total}] "
-                                    f"{product.get('name', 'N/A')}"
+                                    f"{product.get('name', 'N/A')} "
+                                    f"| SKU: {product.get('sku', 'N/A')}"
                                     f"{colors_info}"
-                                    f"{variant_info}"
+                                    + (f" | 🧩 variantă {pidx}/{len(products_batch)}" if len(products_batch) > 1 else "")
                                 )
-                    except Exception as e:
+                    else:
+                        with results_container:
+                            st.warning(
+                                f"⚠️ [{i + 1}/{total}] "
+                                f"Nu am putut extrage: "
+                                f"{url[:80]}"
+                            )
+                except Exception as e:
                     with results_container:
                         st.error(
                             f"❌ [{i + 1}/{total}] "
@@ -569,9 +568,7 @@ if st.session_state.step == 1:
 
                     new_desc = st.text_area(
                         "Editează descrierea:",
-                        value=product.get(
-                            'description', ''
-                        )[:500],
+                        value=(product.get('description') or product.get('description_html') or ''),
                         height=100,
                         key=f"desc_{idx}",
                     )
@@ -583,8 +580,7 @@ if st.session_state.step == 1:
                         sp[idx]['name'] = new_name
                         sp[idx]['final_price'] = new_price
                         sp[idx]['sku'] = new_sku
-                        if new_desc:
-                            sp[idx]['description'] = new_desc
+                        sp[idx]['description'] = new_desc
                         st.success("✅ Modificări salvate!")
                         st.rerun()
 
@@ -641,7 +637,7 @@ if st.session_state.step == 1:
                     'Nume': p.get('name', ''),
                     'SKU': p.get('sku', ''),
                     'Descriere': p.get('description', '') or p.get('description_html', ''),
-                    'Specificații': json.dumps(p.get('specs', {}), ensure_ascii=False),
+                    'Specificații': json.dumps(p.get('specifications', p.get('specs', {})) or {}, ensure_ascii=False),
                     
                     'Preț Original': p.get('original_price', 0),
                     'Moneda': p.get('currency', 'EUR'),
