@@ -259,7 +259,7 @@ if st.session_state.step == 1:
             start_scraping = st.button(
                 "🚀 Începe Extragerea Datelor",
                 type="primary",
-                use_container_width=True,
+                width='stretch',
             )
 
         with col2:
@@ -408,6 +408,22 @@ if st.session_state.step == 1:
                     )
                     st.write(
                         f"**SKU:** {product.get('sku', 'N/A')}"
+                    )
+                    st.write(
+                        f"**Preț original:** "
+                        f"{product.get('original_price', 0):.2f} "
+                        f"{product.get('currency', 'EUR')}"
+                    )
+                    st.write(
+                        f"**Preț final (x2):** "
+                        f"{product.get('final_price', 0):.2f} LEI"
+                    )
+                    st.write(
+                        f"**Stoc:** {product.get('stock', 1)}"
+                    )
+                    st.write(
+                        f"**Sursă:** "
+                        f"{product.get('source_site', 'N/A')}"
                     )
                     st.write(
                         f"**URL:** "
@@ -584,7 +600,7 @@ if st.session_state.step == 1:
             if st.button(
                 "➡️ Continuă la Pasul 2: Import în Gomag",
                 type="primary",
-                use_container_width=True,
+                width='stretch',
             ):
                 st.session_state.translated_products = (
                     st.session_state.scraped_products.copy()
@@ -596,7 +612,7 @@ if st.session_state.step == 1:
             if st.button(
                 "🗑️ Șterge toate produsele extrase",
                 type="secondary",
-                use_container_width=True,
+                width='stretch',
             ):
                 st.session_state.scraped_products = []
                 st.session_state.translated_products = []
@@ -625,22 +641,25 @@ if st.session_state.step == 1:
         with col_exp2:
             export_data = []
             for p in st.session_state.scraped_products:
+                # Keep export focused on Step 1 verification fields
+                specs = p.get('specifications', {}) or {}
+                try:
+                    specs_json = json.dumps(specs, ensure_ascii=False)
+                except Exception:
+                    specs_json = str(specs)
+
                 export_data.append({
                     'Nume': p.get('name', ''),
                     'SKU': p.get('sku', ''),
-                    'Preț Original': p.get('original_price', 0),
-                    'Moneda': p.get('currency', 'EUR'),
                     'Preț Final LEI': p.get('final_price', 0),
-                    'Stoc': p.get('stock', 1),
+                    'Moneda': p.get('currency', 'EUR'),
                     'Culori': ', '.join(p.get('colors', [])),
-                    'Nr Variante': len(
-                        p.get('color_variants', [])
-                    ),
-                    'Nr Imagini': len(p.get('images', [])),
-                    'Imagini': ' | '.join(
-                        p.get('images', [])[:5]
-                    ),
-                    'Sursă': p.get('source_url', ''),
+                    'Descriere': p.get('description', ''),
+                    'Specificații (JSON)': specs_json,
+                    'Nr Variante': len(p.get('color_variants', []) or []),
+                    'Nr Imagini': len(p.get('images', []) or []),
+                    'Imagini (primele 10)': ' | '.join((p.get('images', []) or [])[:10]),
+                    'URL Sursă': p.get('source_url', ''),
                     'Site': p.get('source_site', ''),
                 })
             df_export = pd.DataFrame(export_data)
