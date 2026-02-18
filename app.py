@@ -204,10 +204,12 @@ if st.session_state.step == 1:
                     st.session_state.urls_to_process = urls
 
             except Exception as e:
-                st.error(
-                    f"❌ Eroare la citirea fișierului: {str(e)}"
-                )
-
+                err_short = f"{type(e).__name__}: {repr(e)}"
+                with results_container:
+                    st.error(f"❌ [{i + 1}/{total}] Eroare: {err_short}")
+                    with st.expander("Detalii eroare (traceback)"):
+                        import traceback as _tb
+                        st.code(_tb.format_exc())
     with tab_manual:
         st.markdown("Introdu URL-urile (câte unul pe linie):")
 
@@ -297,42 +299,53 @@ if st.session_state.step == 1:
                 scraper = active_scrapers[scraper_name]
 
                 try:
-                    result = scraper.scrape(url)
+                    product = scraper.scrape(url)
 
-                    products_batch = []
-                    if isinstance(result, list):
-                        products_batch = [p for p in result if isinstance(p, dict)]
-                    elif isinstance(result, dict):
-                        products_batch = [result]
-
-                    if products_batch:
-                        for pidx, product in enumerate(products_batch, start=1):
-                            if translate_option:
-                                status_text.text(f"🌍 Traduc {i + 1}/{total}... (variantă {pidx}/{len(products_batch)})")
-                                try:
-                                    product = translate_product_data(product)
-                                except Exception as te:
-                                    st.warning(f"⚠️ Traducere eșuată: {type(te).__name__}: {repr(te)}")
-
-                            st.session_state.scraped_products.append(product)
-
-                            with results_container:
-                                colors_info = ""
-                                if product.get('colors'):
-                                    colors_info = f" | 🎨 {len(product.get('colors'))} culori"
-
-                                st.success(
-                                    f"✅ [{i + 1}/{total}] "
-                                    f"{product.get('name', 'N/A')} "
-                                    f"| SKU: {product.get('sku', 'N/A')}"
-                                    f"{colors_info}"
-                                    + (f" | 🧩 variantă {pidx}/{len(products_batch)}" if len(products_batch) > 1 else "")
+                    if product:
+                        # Traducere dacă e activată
+                        if translate_option:
+                            status_text.text(
+                                f"🌍 Traduc {i + 1}/{total}..."
+                            )
+                            try:
+                                product = translate_product_data(
+                                    product
                                 )
+                            except Exception as te:
+                                st.warning(
+                                    f"⚠️ Traducere eșuată: "
+                                    f"{str(te)[:80]}"
+                                )
+
+                        st.session_state.scraped_products.append(
+                            product
+                        )
+
+                        with results_container:
+                            colors_info = ""
+                            if product.get('colors'):
+                                colors_info = (
+                                    f" | 🎨 "
+                                    f"{len(product['colors'])} culori"
+                                )
+                            st.success(
+                                f"✅ [{i + 1}/{total}] "
+                                f"{product.get('name', 'N/A')} "
+                                f"| Preț: "
+                                f"{product.get('final_price', 0):.2f}"
+                                f" LEI "
+                                f"| SKU: "
+                                f"{product.get('sku', 'N/A')}"
+                                f"{colors_info}"
+                            )
                     else:
                         with results_container:
                             st.warning(
-                                f"⚠️ [{i + 1}/{total}] Nu am putut extrage: {url[:80]}"
+                                f"⚠️ [{i + 1}/{total}] "
+                                f"Nu am putut extrage: "
+                                f"{url[:80]}"
                             )
+
                 except Exception as e:
                     with results_container:
                         st.error(
