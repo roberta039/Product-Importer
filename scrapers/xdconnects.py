@@ -1,39 +1,42 @@
 # scrapers/xdconnects.py
-# XD Connects Scraper v5.3 (no-tab-click, robust)
-# Goals:
-# - Stay on product page (avoid mis-click navigation)
-# - Extract Description + Specifications reliably from page text/HTML (including hidden DOM)
-# - Color fallback (from specs or raw text)
-# - Images extraction
-# - Robust price extraction
-
+# VERSIUNE 5.0 - fix EUR, imagini, culori, screenshot debug
+"""
+Scraper XD Connects v5.0
+- Preț: EUR și RON
+- Imagini: src direct + background-image
+- Culori: swatch mic
+- Screenshot debug
+"""
 import re
 import time
-from typing import Any, Dict, List, Optional, Tuple
-
-import streamlit as st
 from bs4 import BeautifulSoup
-from selenium.webdriver.common.by import By
-from selenium.common.exceptions import NoSuchElementException
-
 from scrapers.base_scraper import BaseScraper
 from utils.helpers import clean_price
 from utils.image_handler import make_absolute_url
+import streamlit as st
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.common.exceptions import (
+    NoSuchElementException, StaleElementReferenceException,
+)
 
-XD_SCRAPER_VERSION = "2026-02-17-xd-v5.3-no-tab-click"
-def _extract_variant_ids(page_source: str, url: str, current_sku: str) -> List[str]:
+
+# --- helpers for variants ---
+def _extract_variant_ids_from_html(html: str, url: str, current_sku: str) -> list[str]:
     ids = set()
-    try:
-        for m in re.finditer(r"variantId=([A-Z0-9.]+)", url, flags=re.IGNORECASE):
+    if url:
+        for m in re.finditer(r"variantId=([A-Za-z0-9.]+)", url):
             ids.add(m.group(1).upper())
-        for m in re.finditer(r"variantId=([A-Z0-9.]+)", page_source, flags=re.IGNORECASE):
+    if html:
+        for m in re.finditer(r"variantId=([A-Za-z0-9.]+)", html):
             ids.add(m.group(1).upper())
-        for m in re.finditer(r"__([pP]\d{3}\.\d{2,3})__", page_source):
+        # image naming convention p705.70__p705.709__xxxx.jpg
+        for m in re.finditer(r"__([pP]\d{3}\.\d{2,3})__", html):
             ids.add(m.group(1).upper())
-        if current_sku:
-            ids.add(current_sku.upper())
-    except Exception:
-        pass
+    if current_sku:
+        ids.add(current_sku.upper())
+
+    # Filter by base code (P705 etc) to avoid noise
     if current_sku and "." in current_sku:
         base = current_sku.split(".")[0].upper()
         ids = {x for x in ids if x.startswith(base)}
@@ -41,184 +44,13 @@ def _extract_variant_ids(page_source: str, url: str, current_sku: str) -> List[s
     return out[:25]
 
 def _set_variant_in_url(url: str, variant_id: str) -> str:
+    if not url:
+        return url
     if "variantId=" in url:
-        return re.sub(r"variantId=([A-Z0-9.]+)", f"variantId={variant_id}", url, flags=re.IGNORECASE)
+        return re.sub(r"variantId=([A-Za-z0-9.]+)", f"variantId={variant_id}", url)
     joiner = "&" if "?" in url else "?"
     return f"{url}{joiner}variantId={variant_id}"
-
-
-
-def _specs_to_dict(specs: Any) -> Dict[str, str]:
-    """Normalize specs to dict (supports dict or list of (k,v))."""
-    if isinstance(specs, dict):
-        return {str(k).strip(): str(v).strip() for k, v in specs.items()}
-    d: Dict[str, str] = {}
-    try:
-        for k, v in specs:
-            ks = str(k).strip()
-            vs = str(v).strip()
-            if ks:
-                d[ks] = vs
-    except Exception:
-        pass
-    return d
-
-
-def _extract_colour_from_text(raw_text: str) -> Optional[str]:
-    if not raw_text:
-        return None
-
-    # 1) "Colour <value>" (often in Primary specifications)
-    m = re.search(r"\bColour\b\s*[:\t ]+\s*([^\n\r\t]+)", raw_text, flags=re.IGNORECASE)
-    if m:
-        val = m.group(1).strip()
-        val = re.split(r"\s{2,}|\t|•|\|", val)[0].strip()
-        if 1 <= len(val) <= 40:
-            return val
-
-    # 2) after "Item no."
-    m = re.search(r"Item no\.\s*[A-Z0-9\.]+\s*\n([A-Za-z][A-Za-z \-]{2,40})\n", raw_text)
-    if m:
-        return m.group(1).strip()
-
-    return None
-
-
-def _parse_product_details_from_text(raw_text: str) -> Tuple[str, Dict[str, str]]:
-    """
-    Parse the 'Product details' section from body text.
-    Works when Product details is rendered as plain text.
-    Returns (description_text, specs_dict).
-    """
-    if not raw_text:
-        return "", {}
-
-    txt = raw_text
-    idx = txt.lower().find("product details")
-    if idx != -1:
-        txt = txt[idx: idx + 12000]
-
-    txt = txt.replace("\r", "\n")
-    txt = re.sub(r"[ \t]+\n", "\n", txt)
-    txt = re.sub(r"\n{3,}", "\n\n", txt).strip()
-
-    specs: Dict[str, str] = {}
-    lines = [ln.strip() for ln in txt.split("\n") if ln.strip()]
-
-    def _is_key_value_line(s: str) -> bool:
-        return bool(re.match(r"^[A-Za-z].{0,45}\s{2,}.+$", s) or re.match(r"^[A-Za-z].{0,45}\t+.+$", s))
-
-    i = 0
-    while i < len(lines):
-        ln = lines[i]
-
-        if ln.lower() in {"login", "register", "privacy policy"}:
-            break
-
-        # key  value (2+ spaces) or key\tvalue
-        m = re.match(r"^([A-Za-z][A-Za-z0-9 \-/®™’']{1,60})\s{2,}(.+)$", ln) or \
-            re.match(r"^([A-Za-z][A-Za-z0-9 \-/®™’']{1,60})\t+(.+)$", ln)
-        if m:
-            key = m.group(1).strip()
-            val = m.group(2).strip()
-
-            if key.lower() == "product usps":
-                vals = [val] if val else []
-                j = i + 1
-                while j < len(lines):
-                    nxt = lines[j]
-                    if _is_key_value_line(nxt) or nxt.lower() in {"primary specifications", "description"}:
-                        break
-                    if nxt.lower() in {"product details", "primary specifications"}:
-                        j += 1
-                        continue
-                    vals.append(nxt)
-                    j += 1
-                specs[key] = " ".join([v.strip() for v in vals if v.strip()])
-                i = j
-                continue
-
-            specs[key] = val
-            i += 1
-            continue
-
-        # Headings
-        if ln.lower() in {"product details", "primary specifications"}:
-            i += 1
-            continue
-
-        # Description line without separator
-        if ln.lower().startswith("description"):
-            desc = ln[len("description"):].strip(" :\t")
-            if not desc:
-                vals = []
-                j = i + 1
-                while j < len(lines):
-                    nxt = lines[j]
-                    if _is_key_value_line(nxt) or nxt.lower() in {"product usps", "primary specifications"}:
-                        break
-                    vals.append(nxt)
-                    j += 1
-                desc = " ".join(vals).strip()
-                i = j
-            else:
-                i += 1
-            if desc:
-                specs["Description"] = desc
-            continue
-
-        i += 1
-
-    return specs.get("Description", ""), specs
-
-
-def _parse_product_details_from_html(soup: BeautifulSoup) -> Tuple[str, Dict[str, str]]:
-    """
-    Parse product details from HTML without clicking tabs.
-    Works even if the content is hidden (display:none) because we read the DOM.
-    Tries: tables, dl/dt/dd, and generic 2-column rows.
-    """
-    if soup is None:
-        return "", {}
-
-    specs: Dict[str, str] = {}
-
-    # 1) tables
-    for table in soup.select("table"):
-        for row in table.select("tr"):
-            cells = row.find_all(["th", "td"])
-            if len(cells) >= 2:
-                k = cells[0].get_text(" ", strip=True)
-                v = cells[1].get_text(" ", strip=True)
-                if k and v and len(k) <= 80:
-                    specs[k.strip()] = v.strip()
-
-    # 2) definition lists
-    for dl in soup.select("dl"):
-        for dt in dl.find_all("dt"):
-            dd = dt.find_next_sibling("dd")
-            if not dd:
-                continue
-            k = dt.get_text(" ", strip=True)
-            v = dd.get_text(" ", strip=True)
-            if k and v and len(k) <= 80:
-                specs[k.strip()] = v.strip()
-
-    # 3) targeted keys
-    for key in ["Description", "Item no.", "Product USPs", "CO2-eq", "Colour", "Color"]:
-        if key in specs:
-            continue
-        node = soup.find(lambda tag: tag.name in {"div", "span", "p", "strong", "th", "td"} and tag.get_text(" ", strip=True) == key)
-        if node:
-            cand = node.find_next_sibling() or node.find_next()
-            if cand:
-                v = cand.get_text(" ", strip=True)
-                v = re.sub(r"\s{2,}", " ", v).strip()
-                if v and v.lower() != key.lower():
-                    specs[key] = v
-
-    return specs.get("Description", ""), specs
-
+# --- end helpers ---
 
 class XDConnectsScraper(BaseScraper):
     def __init__(self):
@@ -235,20 +67,25 @@ class XDConnectsScraper(BaseScraper):
             "#CybotCookiebotDialogBodyButtonAccept",
         ]:
             try:
-                btn = self.driver.find_element(By.CSS_SELECTOR, sel)
+                btn = self.driver.find_element(
+                    By.CSS_SELECTOR, sel
+                )
                 if btn.is_displayed():
-                    self.driver.execute_script("arguments[0].click();", btn)
-                    time.sleep(1.2)
+                    self.driver.execute_script(
+                        "arguments[0].click();", btn
+                    )
+                    time.sleep(2)
                     return
             except NoSuchElementException:
                 continue
-            except Exception:
-                continue
-        # fallback: remove overlay if present
         try:
             self.driver.execute_script(
-                "var s=['#CybotCookiebotDialog','#CybotCookiebotDialogBodyUnderlay'];"
-                "s.forEach(function(x){document.querySelectorAll(x).forEach(function(e){e.remove();});});"
+                "var s=['#CybotCookiebotDialog',"
+                "'#CybotCookiebotDialogBodyUnderlay'];"
+                "s.forEach(function(x){"
+                "document.querySelectorAll(x).forEach("
+                "function(e){e.remove();});"
+                "});"
                 "document.body.style.overflow='auto';"
             )
         except Exception:
@@ -257,307 +94,704 @@ class XDConnectsScraper(BaseScraper):
     def _login_if_needed(self):
         if self._logged_in:
             return
-        print("XD SCRAPER VERSION:", XD_SCRAPER_VERSION)
         try:
-            xd_user = st.secrets.get("SOURCES", {}).get("XD_USER", "")
-            xd_pass = st.secrets.get("SOURCES", {}).get("XD_PASS", "")
+            xd_user = st.secrets.get("SOURCES", {}).get(
+                "XD_USER", ""
+            )
+            xd_pass = st.secrets.get("SOURCES", {}).get(
+                "XD_PASS", ""
+            )
             if not xd_user or not xd_pass:
-                self._logged_in = True
                 return
-
             self._init_driver()
             if not self.driver:
-                self._logged_in = True
                 return
-
             st.info("🔐 XD: Mă conectez...")
-            self.driver.get(self.base_url + "/en-gb/profile/login")
-            time.sleep(4)
+            self.driver.get(
+                self.base_url + "/en-gb/profile/login"
+            )
+            time.sleep(5)
             self._dismiss_cookie_banner()
-
-            # email
-            email_el = None
-            for sel in ["input[type='email'][name='email']", "input[name='email']", "input[type='email']"]:
+            time.sleep(1)
+            for sel in [
+                "input[type='email'][name='email']",
+                "input[name='email']",
+                "input[type='email']",
+            ]:
                 try:
-                    for f in self.driver.find_elements(By.CSS_SELECTOR, sel):
+                    for f in self.driver.find_elements(
+                        By.CSS_SELECTOR, sel
+                    ):
                         if f.is_displayed() and f.is_enabled():
-                            email_el = f
+                            f.clear()
+                            f.send_keys(xd_user)
                             break
-                    if email_el:
-                        break
-                except Exception:
-                    continue
-            if email_el:
-                email_el.clear()
-                email_el.send_keys(xd_user)
-
-            # pass
-            try:
-                pw = self.driver.find_element(By.CSS_SELECTOR, "input[type='password']")
-                pw.clear()
-                pw.send_keys(xd_pass)
-            except Exception:
-                pass
-
-            self._dismiss_cookie_banner()
-
-            # submit
-            for sel in ["form button[type='submit']", "button[type='submit']"]:
-                try:
-                    for btn in self.driver.find_elements(By.CSS_SELECTOR, sel):
-                        if btn.is_displayed():
-                            self.driver.execute_script("arguments[0].click();", btn)
-                            raise StopIteration
-                except StopIteration:
+                    else:
+                        continue
                     break
                 except Exception:
                     continue
-
-            time.sleep(5)
+            for f in self.driver.find_elements(
+                By.CSS_SELECTOR, "input[type='password']"
+            ):
+                if f.is_displayed() and f.is_enabled():
+                    f.clear()
+                    f.send_keys(xd_pass)
+                    break
+            self._dismiss_cookie_banner()
+            for sel in [
+                "form button[type='submit']",
+                "button[type='submit']",
+            ]:
+                try:
+                    for btn in self.driver.find_elements(
+                        By.CSS_SELECTOR, sel
+                    ):
+                        if btn.is_displayed():
+                            self.driver.execute_script(
+                                "arguments[0].click();", btn
+                            )
+                            break
+                    break
+                except Exception:
+                    continue
+            time.sleep(6)
             self._logged_in = True
             st.success("✅ XD: Login reușit!")
         except Exception as e:
-            st.warning(f"⚠️ XD login: {str(e)[:120]}")
+            st.warning(f"⚠️ XD login: {str(e)[:100]}")
             self._logged_in = True
 
-    def _looks_like_product_page(self, body_text: str, page_source: str) -> bool:
-        t = (body_text or "").lower()
-        s = (page_source or "").lower()
-        return ("item no." in t) or ("item no." in s) or (("price" in t) and ("€" in t))
+    def _scrape_one(self, url: str) -> dict | None:
+        try:
+            self._login_if_needed()
+            self._init_driver()
+            if not self.driver:
+                return None
 
-def _scrape_one(self, url: str) -> Optional[dict]:
-    try:
-        self._login_if_needed()
-        self._init_driver()
-        if not self.driver:
+            st.info(f"📦 XD v5.0: {url[:70]}...")
+            self.driver.get(url)
+            time.sleep(7)
+            self._dismiss_cookie_banner()
+            time.sleep(2)
+
+            # Scroll
+            for frac in ['0.3', '0.5', '0.8', '1', '0']:
+                self.driver.execute_script(
+                    "window.scrollTo(0,"
+                    "document.body.scrollHeight*"
+                    + frac + ");"
+                )
+                time.sleep(0.8)
+
+            # Click tab-uri
+            try:
+                tabs = self.driver.find_elements(
+                    By.CSS_SELECTOR,
+                    "[role='tab'], .nav-tabs a, "
+                    "[class*='tab'] a, "
+                    "[class*='tab'] button"
+                )
+                for tab in tabs:
+                    try:
+                        txt = tab.text.lower().strip()
+                        if any(
+                            kw in txt
+                            for kw in [
+                                'descri', 'specifi',
+                                'detail', 'feature',
+                            ]
+                        ):
+                            self.driver.execute_script(
+                                "arguments[0].click();", tab
+                            )
+                            time.sleep(1)
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+            # ═══ SCREENSHOT DEBUG ═══
+            try:
+                ss = self.driver.get_screenshot_as_png()
+                st.image(ss, caption="XD pagina produs", width=700)
+            except Exception:
+                pass
+
+            page_source = self.driver.page_source
+
+            # ═══ DEBUG: primul 2000 caractere text vizibil ═══
+            try:
+                visible_text = self.driver.execute_script(
+                    "return document.body.innerText"
+                    ".substring(0, 2000);"
+                )
+                st.text_area(
+                    "DEBUG: Text vizibil pe pagină",
+                    visible_text,
+                    height=200
+                )
+            except Exception:
+                pass
+
+            soup = BeautifulSoup(page_source, 'html.parser')
+
+            # ═══ NUME ═══
+            name = ""
+            h1 = soup.select_one('h1')
+            if h1:
+                name = h1.get_text(strip=True)
+            if not name:
+                name = "Produs XD Connects"
+
+            # ═══ SKU ═══
+            sku = ""
+            im = re.search(
+                r'Item\s*no\.?\s*:?\s*([A-Z0-9.]+)',
+                page_source, re.IGNORECASE
+            )
+            if im:
+                sku = im.group(1).upper()
+            if not sku:
+                sm = re.search(
+                    r'([pP]\d{3}\.\d{2,3})', url
+                )
+                if sm:
+                    sku = sm.group(1).upper()
+
+            # ═══ PREȚ (EUR + RON) ═══
+            price = 0.0
+            currency = 'EUR'
+            try:
+                price_info = self.driver.execute_script("""
+                    var body = document.body.innerText;
+                    var result = {price: '', currency: ''};
+
+                    // RON
+                    var ronMatch = body.match(
+                        /(?:From\\s+)?(\\d{1,6}[.,]\\d{2})\\s*RON/i
+                    );
+                    if (ronMatch) {
+                        result.price = ronMatch[1];
+                        result.currency = 'RON';
+                        return result;
+                    }
+
+                    // EUR cu simbol €
+                    var eurMatch = body.match(
+                        /(?:From\\s+)?[€]\\s*(\\d{1,6}[.,]\\d{2})/
+                    );
+                    if (eurMatch) {
+                        result.price = eurMatch[1];
+                        result.currency = 'EUR';
+                        return result;
+                    }
+
+                    // EUR text
+                    var eurMatch2 = body.match(
+                        /(?:From\\s+)?(\\d{1,6}[.,]\\d{2})\\s*EUR/i
+                    );
+                    if (eurMatch2) {
+                        result.price = eurMatch2[1];
+                        result.currency = 'EUR';
+                        return result;
+                    }
+
+                    // Orice preț cu .XX sau ,XX
+                    var anyMatch = body.match(
+                        /(?:From\\s+)?(\\d{1,6}[.,]\\d{2})/
+                    );
+                    if (anyMatch) {
+                        result.price = anyMatch[1];
+                        result.currency = 'EUR';
+                        return result;
+                    }
+
+                    return result;
+                """)
+                if price_info:
+                    price_str = price_info.get('price', '')
+                    if price_str:
+                        price = clean_price(str(price_str))
+                    currency = price_info.get(
+                        'currency', 'EUR'
+                    )
+            except Exception as e:
+                st.warning(f"⚠️ PREȚ err: {str(e)[:50]}")
+
+            if price <= 0:
+                for pattern in [
+                    r'(\d{1,6}[.,]\d{2})\s*RON',
+                    r'[€]\s*(\d{1,6}[.,]\d{2})',
+                    r'(\d{1,6}[.,]\d{2})\s*EUR',
+                ]:
+                    pm = re.search(
+                        pattern, page_source, re.IGNORECASE
+                    )
+                    if pm:
+                        price = clean_price(pm.group(1))
+                        if 'RON' in pattern:
+                            currency = 'RON'
+                        else:
+                            currency = 'EUR'
+                        break
+
+            st.info(f"💰 PREȚ: {price} {currency}")
+
+            # ═══ DESCRIERE ═══
+            description = ""
+            try:
+                dr = self.driver.execute_script("""
+                    var result = '';
+                    var sels = [
+                        '[class*="description"]',
+                        '[class*="detail-desc"]',
+                        '#description',
+                        '.tab-pane',
+                        '[class*="product-info"]',
+                        '[class*="content"]',
+                        'article'
+                    ];
+                    for (var i = 0; i < sels.length; i++) {
+                        var els = document.querySelectorAll(
+                            sels[i]
+                        );
+                        for (var j = 0; j < els.length; j++) {
+                            var t = els[j].innerText.trim();
+                            if (t.length > 30 &&
+                                t.length < 5000 &&
+                                t.length > result.length &&
+                                t.indexOf('Accept') === -1 &&
+                                t.indexOf('Cookie') === -1 &&
+                                t.indexOf('cookie') === -1) {
+                                result = t;
+                            }
+                        }
+                        if (result.length > 100) break;
+                    }
+                    if (result.length < 30) {
+                        var ps = document.querySelectorAll('p');
+                        var arr = [];
+                        for (var k = 0; k < ps.length; k++) {
+                            var pt = ps[k].innerText.trim();
+                            if (pt.length > 15 &&
+                                pt.length < 500 &&
+                                pt.indexOf('Cookie') === -1 &&
+                                pt.indexOf('cookie') === -1 &&
+                                pt.indexOf('Login') === -1) {
+                                arr.push(pt);
+                            }
+                        }
+                        if (arr.length > 0)
+                            result = arr.join(' | ');
+                    }
+                    return result;
+                """)
+                if dr and len(str(dr)) > 15:
+                    raw = str(dr).strip()
+                    lines = raw.split('\n')
+                    clean = []
+                    for line in lines:
+                        line = line.strip()
+                        if (
+                            line and len(line) > 5
+                            and 'cookie' not in line.lower()
+                            and 'accept' not in line.lower()
+                            and 'login' not in line.lower()
+                            and 'ORDER' not in line
+                            and 'Add to' not in line
+                            and 'Adăugați' not in line
+                        ):
+                            clean.append(line)
+                    if clean:
+                        description = (
+                            '<p>' +
+                            '</p><p>'.join(clean[:15]) +
+                            '</p>'
+                        )
+            except Exception as e:
+                st.warning(f"⚠️ DESC: {str(e)[:50]}")
+
+            if not description or len(description) < 30:
+                meta = soup.select_one(
+                    'meta[name="description"]'
+                )
+                if meta:
+                    mc = meta.get('content', '')
+                    if mc and len(mc) > 15:
+                        description = '<p>' + mc + '</p>'
+
+            st.info(f"📝 DESC: {len(description)} car")
+
+            # ═══ SPECIFICAȚII ═══
+            specifications = {}
+            try:
+                sp = self.driver.execute_script("""
+                    var specs = {};
+                    var tables = document.querySelectorAll(
+                        'table'
+                    );
+                    for (var t = 0; t < tables.length; t++) {
+                        var rows = tables[t]
+                            .querySelectorAll('tr');
+                        var isPrice = false;
+                        for (var r = 0;
+                             r < rows.length; r++) {
+                            var cells = rows[r]
+                                .querySelectorAll('td, th');
+                            if (cells.length >= 2) {
+                                var k = cells[0]
+                                    .innerText.trim();
+                                var v = cells[1]
+                                    .innerText.trim();
+                                // Skip price tables
+                                if (k === 'Quantity' ||
+                                    k === 'Printed*' ||
+                                    k === 'Plain' ||
+                                    v.indexOf('RON') > -1 ||
+                                    v.indexOf('EUR') > -1 ||
+                                    v.indexOf('€') > -1) {
+                                    isPrice = true;
+                                    continue;
+                                }
+                                if (!isPrice && k && v &&
+                                    k.length < 50 &&
+                                    v.length < 300) {
+                                    specs[k] = v;
+                                }
+                            }
+                        }
+                        if (Object.keys(specs).length > 0)
+                            break;
+                    }
+                    if (Object.keys(specs).length === 0) {
+                        var dts = document.querySelectorAll(
+                            'dt'
+                        );
+                        var dds = document.querySelectorAll(
+                            'dd'
+                        );
+                        var n = Math.min(
+                            dts.length, dds.length
+                        );
+                        for (var i = 0; i < n; i++) {
+                            var dk = dts[i].innerText.trim();
+                            var dv = dds[i].innerText.trim();
+                            if (dk && dv && dk.length < 50 &&
+                                dv.indexOf('€') === -1 &&
+                                dv.indexOf('RON') === -1) {
+                                specs[dk] = dv;
+                            }
+                        }
+                    }
+                    return specs;
+                """)
+                if sp and isinstance(sp, dict):
+                    specifications = sp
+            except Exception as e:
+                st.warning(f"⚠️ SPEC: {str(e)[:50]}")
+
+            # Fallback specs din bullet text
+            if not specifications:
+                bm = re.findall(
+                    r'([\w\s]+)\s*[•●]\s*',
+                    page_source
+                )
+                if bm and len(bm) >= 2:
+                    for i, item in enumerate(bm[:6]):
+                        item = item.strip()
+                        if (
+                            item and len(item) > 2
+                            and len(item) < 50
+                        ):
+                            specifications[
+                                f'Feature {i+1}'
+                            ] = item
+
+            st.info(
+                f"📋 SPECS: {len(specifications)} = "
+                f"{list(specifications.items())[:3]}"
+            )
+
+            # ═══ CULORI ═══
+            colors = []
+            color_variants = []
+            try:
+                cr = self.driver.execute_script("""
+                    var results = [];
+                    var links = document.querySelectorAll(
+                        'a[href*="variantId"]'
+                    );
+
+                    for (var i = 0; i < links.length; i++) {
+                        var el = links[i];
+                        var name = (
+                            el.getAttribute('title') ||
+                            el.getAttribute('aria-label') ||
+                            ''
+                        ).trim();
+
+                        var href =
+                            el.getAttribute('href') || '';
+                        var vm = href.match(
+                            /variantId=([A-Z0-9.]+)/i
+                        );
+                        var vid = vm ?
+                            vm[1].toUpperCase() : '';
+
+                        if (!name && vid) name = vid;
+
+                        var rect = el.getBoundingClientRect();
+
+                        // Swatch = element MIC (<100px)
+                        // cu background-color
+                        var isSwatch = (
+                            rect.width > 5 &&
+                            rect.width < 100 &&
+                            rect.height > 5 &&
+                            rect.height < 100
+                        );
+
+                        // Excludem orice text lung sau
+                        // cu cuvinte produse
+                        var nameLen = name.length;
+                        var isShort = nameLen > 0 && nameLen < 20;
+
+                        if (isSwatch && isShort) {
+                            var exists = false;
+                            for (var r = 0;
+                                 r < results.length; r++) {
+                                if (results[r].name === name) {
+                                    exists = true;
+                                    break;
+                                }
+                            }
+                            if (!exists) {
+                                results.push({
+                                    name: name,
+                                    href: href,
+                                    vid: vid
+                                });
+                            }
+                        }
+                    }
+                    return results;
+                """)
+                if cr:
+                    for item in cr:
+                        c = item.get('name', '').strip()
+                        if c and c not in colors:
+                            colors.append(c)
+                            color_variants.append({
+                                'name': c,
+                                'url': make_absolute_url(
+                                    item.get('href', ''),
+                                    self.base_url
+                                ),
+                                'image': '',
+                                'color_code': item.get(
+                                    'vid', ''
+                                ),
+                                'variant_id': item.get(
+                                    'vid', ''
+                                ),
+                            })
+            except Exception as e:
+                st.warning(f"⚠️ CULORI: {str(e)[:50]}")
+
+            st.info(f"🎨 CULORI: {len(colors)} = {colors}")
+
+            # ═══ IMAGINI ═══
+            images = []
+            try:
+                ir = self.driver.execute_script("""
+                    var results = [];
+
+                    // Metoda 1: img tags
+                    var imgs = document.querySelectorAll('img');
+                    for (var i = 0; i < imgs.length; i++) {
+                        var src =
+                            imgs[i].getAttribute('data-src') ||
+                            imgs[i].getAttribute('src') ||
+                            imgs[i].getAttribute('data-lazy') ||
+                            '';
+                        if (src.length < 10) continue;
+
+                        // Orice imagine mare de produs
+                        var isProduct = (
+                            src.indexOf('ProductImages') > -1 ||
+                            src.indexOf('product') > -1 ||
+                            src.indexOf('static.xd') > -1
+                        );
+                        var isBad = (
+                            src.indexOf('icon') > -1 ||
+                            src.indexOf('logo') > -1 ||
+                            src.indexOf('flag') > -1 ||
+                            src.indexOf('co2') > -1 ||
+                            src.indexOf('badge') > -1 ||
+                            src.indexOf('pixel') > -1 ||
+                            src.indexOf('svg') > -1 ||
+                            src.indexOf('data:') > -1
+                        );
+
+                        if (isProduct && !isBad) {
+                            var large = src
+                                .replace('/Small/', '/Large/')
+                                .replace('/Thumb/', '/Large/')
+                                .replace('/Medium/', '/Large/');
+                            if (results.indexOf(large) === -1) {
+                                results.push(large);
+                            }
+                        }
+                    }
+
+                    // Metoda 2: background-image
+                    if (results.length === 0) {
+                        var allEls = document.querySelectorAll(
+                            '[style*="background"]'
+                        );
+                        for (var j = 0;
+                             j < allEls.length; j++) {
+                            var style =
+                                allEls[j].getAttribute('style')
+                                || '';
+                            var bgMatch = style.match(
+                                /url\\(['"]?([^'"\\)]+)/
+                            );
+                            if (bgMatch) {
+                                var bgSrc = bgMatch[1];
+                                if (bgSrc.indexOf(
+                                        'ProductImages') > -1 ||
+                                    bgSrc.indexOf(
+                                        'static.xd') > -1) {
+                                    var lg = bgSrc
+                                        .replace(
+                                            '/Small/', '/Large/'
+                                        )
+                                        .replace(
+                                            '/Thumb/', '/Large/'
+                                        );
+                                    if (results.indexOf(
+                                            lg) === -1) {
+                                        results.push(lg);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Metoda 3: srcset
+                    if (results.length === 0) {
+                        var imgs2 = document.querySelectorAll(
+                            'img[srcset]'
+                        );
+                        for (var k = 0;
+                             k < imgs2.length; k++) {
+                            var srcset =
+                                imgs2[k].getAttribute('srcset')
+                                || '';
+                            var parts = srcset.split(',');
+                            for (var p = parts.length - 1;
+                                 p >= 0; p--) {
+                                var u = parts[p].trim()
+                                    .split(' ')[0];
+                                if (u &&
+                                    u.indexOf('Product') > -1) {
+                                    if (results.indexOf(
+                                            u) === -1) {
+                                        results.push(u);
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    // Debug: raportăm câte img am găsit total
+                    var totalImgs = document
+                        .querySelectorAll('img').length;
+                    if (results.length === 0) {
+                        // Ultima încercare: ORICE imagine
+                        for (var z = 0; z < imgs.length; z++) {
+                            var s =
+                                imgs[z].getAttribute('src') ||
+                                '';
+                            var rect = imgs[z]
+                                .getBoundingClientRect();
+                            if (s.length > 10 &&
+                                rect.width > 50 &&
+                                rect.height > 50 &&
+                                s.indexOf('data:') === -1 &&
+                                s.indexOf('svg') === -1) {
+                                results.push(s);
+                                if (results.length >= 10)
+                                    break;
+                            }
+                        }
+                    }
+
+                    return {
+                        images: results,
+                        totalImgs: totalImgs
+                    };
+                """)
+                if ir:
+                    images = ir.get('images', [])
+                    total_imgs = ir.get('totalImgs', 0)
+                    st.info(
+                        f"📸 Total img pe pagină: "
+                        f"{total_imgs}, "
+                        f"extrase: {len(images)}"
+                    )
+            except Exception as e:
+                st.warning(f"⚠️ IMG: {str(e)[:50]}")
+
+            st.info(
+                f"📸 IMG: {len(images)}"
+                + (
+                    f" ex: {images[0][:60]}..."
+                    if images else " GOLE"
+                )
+            )
+
+            # ═══ BUILD ═══
+            product = self._build_product(
+                name=name,
+                sku=sku,
+                price=price,
+                description=description,
+                images=images,
+                colors=colors,
+                specifications=specifications,
+                source_url=url,
+                source_site=self.name,
+                category='Rucsacuri Anti-Furt',
+                currency=currency,
+            )
+            product['color_variants'] = color_variants
+            product['variant_images'] = {}
+
+            st.success(
+                f"✅ {name[:30]} | P:{price}{currency} | "
+                f"D:{len(description)} | "
+                f"S:{len(specifications)} | "
+                f"C:{len(colors)} | I:{len(images)}"
+            )
+
+            return product
+
+        except Exception as e:
+            st.error(f"❌ XD: {str(e)}")
             return None
 
-        st.info(f"📦 XD v5.3: {url[:70]}...")
-        self.driver.get(url)
-        time.sleep(6)
-        self._dismiss_cookie_banner()
-
-        # Debug current URL (detect redirects)
-        try:
-            cur = self.driver.current_url
-            if cur and cur != url:
-                print("XD DEBUG current_url:", cur)
-        except Exception:
-            pass
-
-        # small scroll for lazy assets
-        for frac in [0.35, 0.8, 0.0]:
-            try:
-                self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight*arguments[0]);", frac)
-            except Exception:
-                pass
-            time.sleep(0.7)
-
-        try:
-            ss = self.driver.get_screenshot_as_png()
-            st.image(ss, caption="XD pagina produs", width=700)
-        except Exception:
-            pass
-
-        # raw text + html
-        try:
-            raw_text = self.driver.execute_script("return document.body.innerText || '';") or ""
-        except Exception:
-            raw_text = ""
-
-        page_source = self.driver.page_source or ""
-        soup = BeautifulSoup(page_source, "html.parser")
-
-        if not self._looks_like_product_page(raw_text, page_source):
-            print("XD WARNING: page does not look like product page, retrying once...")
-            self.driver.get(url)
-            time.sleep(6)
-            self._dismiss_cookie_banner()
-            try:
-                raw_text = self.driver.execute_script("return document.body.innerText || '';") or ""
-            except Exception:
-                pass
-            page_source = self.driver.page_source or ""
-            soup = BeautifulSoup(page_source, "html.parser")
-
-        try:
-            st.text_area("DEBUG: Text vizibil pe pagină", (raw_text or "")[:2000], height=200)
-        except Exception:
-            pass
-
-        # Name
-        h1 = soup.select_one("h1")
-        name = h1.get_text(strip=True) if h1 else ""
-        if not name:
-            for ln in (raw_text or "").split("\n"):
-                ln = ln.strip()
-                if ln and len(ln) < 120:
-                    name = ln
-                    break
-        if not name:
-            name = "Produs XD Connects"
-
-        # SKU
-        sku = ""
-        im = re.search(r"Item\s*no\.?\s*:?\s*([A-Z0-9.]+)", page_source, re.IGNORECASE)
-        if im:
-            sku = im.group(1).upper()
-        if not sku:
-            vm = re.search(r"variantId=([A-Z0-9.]+)", url, re.IGNORECASE)
-            if vm:
-                sku = vm.group(1).upper()
-        if not sku:
-            sm = re.search(r"([pP]\d{3}\.\d{2,3})", url)
-            if sm:
-                sku = sm.group(1).upper()
-
-        # Price (robust)
-        price = 0.0
-        currency = "EUR"
-        try:
-            price_info = self.driver.execute_script(
-                r"""
-                const body = document.body.innerText || '';
-                const res = {price:'', currency:''};
-
-                // Prefer explicit 'Price €73.8' line if present
-                let m = body.match(/\bPrice\b\s*€\s*(\d{1,6}(?:[\.,]\d{1,2})?)/i);
-                if (m) { res.price=m[1]; res.currency='EUR'; return res; }
-
-                // Or 'From' block
-                m = body.match(/\bFrom\b[\s\S]{0,60}?\bPrice\b\s*€\s*(\d{1,6}(?:[\.,]\d{1,2})?)/i);
-                if (m) { res.price=m[1]; res.currency='EUR'; return res; }
-
-                // Or standalone euro amount '€ 73,80'
-                m = body.match(/€\s*(\d{1,6}(?:[\.,]\d{1,2})?)/);
-                if (m) { res.price=m[1]; res.currency='EUR'; return res; }
-
-                // RON
-                m = body.match(/(\d{1,6}(?:[\.,]\d{1,2})?)\s*RON/i);
-                if (m) { res.price=m[1]; res.currency='RON'; return res; }
-
-                return res;
-                """
-            )
-            if price_info and price_info.get("price"):
-                price = clean_price(str(price_info.get("price")))
-                currency = price_info.get("currency", "EUR") or "EUR"
-        except Exception:
-            pass
-
-        st.info(f"💰 PREȚ: {price} {currency}")
-
-        # Product details:
-        description_text, specifications = _parse_product_details_from_html(soup)
-
-        if not specifications:
-            description_text, specifications = _parse_product_details_from_text(raw_text)
-
-        # last-chance: textContent from DOM even if hidden
-        if not specifications:
-            try:
-                dom_text = self.driver.execute_script(
-                    """
-                    const all = Array.from(document.querySelectorAll('body *'));
-                    const hits = all
-                      .filter(e => {
-                        const t = (e.textContent||'').trim();
-                        if (!t) return false;
-                        return (t.includes('Description') && t.includes('Item no.')) ||
-                               (t.includes('Product USPs') && t.includes('Description')) ||
-                               (t.includes('Primary specifications') && (t.includes('CO2') || t.includes('CO2-eq')));
-                      })
-                      .slice(0, 25)
-                      .map(e => (e.textContent||'').trim())
-                      .join('\\n');
-                    return hits;
-                    """
-                ) or ""
-                if dom_text:
-                    d2, s2 = _parse_product_details_from_text(dom_text)
-                    if s2:
-                        description_text = d2 or description_text
-                        specifications = s2
-            except Exception:
-                pass
-
-        specifications = _specs_to_dict(specifications)
-
-        if sku and "Item no." not in specifications:
-            specifications["Item no."] = sku
-
-        # Build description HTML
-        description = f"<p>{description_text}</p>" if description_text else ""
-        st.info(f"📝 DESC: {len(description_text)} car")
-        st.info(f"📋 SPECS: {len(specifications)}")
-
-        # Colors
-        detected_color = None
-        for key in ("Colour", "Color", "Culoare"):
-            if key in specifications and specifications[key]:
-                detected_color = specifications[key].strip()
-                break
-        if not detected_color:
-            detected_color = _extract_colour_from_text(raw_text)
-
-        colors = [detected_color] if detected_color else []
-        st.info(f"🎨 CULORI: {len(colors)} = {colors}")
-
-        # Images
-        images: List[str] = []
-        try:
-            for img in soup.select("img"):
-                src = img.get("src") or img.get("data-src") or ""
-                if not src:
-                    continue
-                if any(x in src.lower() for x in ["logo", "sprite", "icon", "data:image"]):
-                    continue
-                images.append(make_absolute_url(src, self.base_url))
-
-            for el in soup.select("*[style*='background-image']"):
-                style = el.get("style", "")
-                m = re.search(r"background-image\s*:\s*url\(['\"]?([^'\")]+)", style)
-                if m:
-                    images.append(make_absolute_url(m.group(1), self.base_url))
-
-            seen = set()
-            out = []
-            for u in images:
-                if u not in seen:
-                    seen.add(u)
-                    out.append(u)
-            images = out
-        except Exception:
-            pass
-
-        st.info(f"📸 Total img pe pagină: {len(soup.select('img'))}, extrase: {len(images)}")
-        if images:
-            st.info(f"📸 IMG: {len(images)} ex: {images[0][:80]}...")
-
-        return {
-            "name": name,
-            "sku": sku,
-            "price": price,
-            "currency": currency,
-            "description": description,
-            "specifications": specifications,
-            "colors": colors,
-            "images": images,
-            "source_url": url,
-        }
-
-    except Exception as e:
-        st.warning(f"⚠️ XD scrape error: {str(e)[:160]}")
-        return None
-
 def scrape(self, url: str):
-    """Returnează dict (o variantă) sau list[dict] (toate variantele detectabile în HTML)."""
+    """Returnează dict (o variantă) sau list[dict] (mai multe variante / culori)."""
     product = self._scrape_one(url)
     if not product or not isinstance(product, dict):
         return product
     try:
-        ps = getattr(self.driver, 'page_source', '') or ''
-        variant_ids = _extract_variant_ids(ps, url, product.get('sku',''))
+        html = getattr(self.driver, "page_source", "") or ""
+        variant_ids = _extract_variant_ids_from_html(html, url, product.get("sku", ""))
         if len(variant_ids) <= 1:
             return product
         out = []
@@ -565,8 +799,8 @@ def scrape(self, url: str):
             vurl = _set_variant_in_url(url, vid)
             vprod = self._scrape_one(vurl)
             if isinstance(vprod, dict):
-                vprod['sku'] = vid
-                vprod['source_url'] = vurl
+                vprod["sku"] = vid
+                vprod["source_url"] = vurl
                 out.append(vprod)
         return out if len(out) > 1 else product
     except Exception:
