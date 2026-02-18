@@ -25,6 +25,10 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# Ensure session state
+if 'scraped_products' not in st.session_state:
+    st.session_state.scraped_products = []
+
 st.title("🎒 Import Produse Anti-Theft → Gomag.ro")
 st.markdown("---")
 
@@ -343,8 +347,12 @@ if st.session_state.step == 1:
                     with results_container:
                         st.error(
                             f"❌ [{i + 1}/{total}] "
-                            f"Eroare: {str(e)[:100]}"
+                            f"Eroare: {type(e).__name__}: {repr(e)}"
                         )
+                        with st.expander('Detalii eroare (traceback)'):
+                            import traceback
+                            st.code(traceback.format_exc())
+
 
                 # Delay între request-uri
                 time.sleep(2)
