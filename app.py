@@ -573,9 +573,7 @@ if st.session_state.step == 1:
 
                     new_desc = st.text_area(
                         "Editează descrierea:",
-                        value=product.get(
-                            'description', ''
-                        )[:500],
+                        value=product.get('description') or product.get('description_html') or '',
                         height=100,
                         key=f"desc_{idx}",
                     )
@@ -587,8 +585,7 @@ if st.session_state.step == 1:
                         sp[idx]['name'] = new_name
                         sp[idx]['final_price'] = new_price
                         sp[idx]['sku'] = new_sku
-                        if new_desc:
-                            sp[idx]['description'] = new_desc
+                        sp[idx]['description'] = new_desc
                         st.success("✅ Modificări salvate!")
                         st.rerun()
 
@@ -645,7 +642,7 @@ if st.session_state.step == 1:
                     'Nume': p.get('name', ''),
                     'SKU': p.get('sku', ''),
                     'Descriere': p.get('description', '') or p.get('description_html', ''),
-                    'Specificații': json.dumps(p.get('specs', {}), ensure_ascii=False),
+                    'Specificații': json.dumps(p.get('specifications', p.get('specs', {})) or {}, ensure_ascii=False),
                     
                     'Preț Original': p.get('original_price', 0),
                     'Moneda': p.get('currency', 'EUR'),
@@ -659,7 +656,7 @@ if st.session_state.step == 1:
                     'Imagini': ' | '.join(
                         p.get('images', [])[:5]
                     ),
-                    'Sursă': p.get('source_url', ''),
+                    'Sursă': p.get('source_url', '') or p.get('source_site', '') or p.get('source_url', ''),
                     'Site': p.get('source_site', ''),
                 })
             df_export = pd.DataFrame(export_data)
